@@ -13,7 +13,8 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/hummingbird-project/hummingbird.git", from: "2.22.0"),
-        .package(url: "https://github.com/apple/swift-log.git", from: "1.6.0")
+        .package(url: "https://github.com/apple/swift-log.git", from: "1.6.0"),
+        .package(url: "https://github.com/apple/swift-nio.git", "2.65.0"..<"2.87.0")
     ],
     targets: [
         .executableTarget(
