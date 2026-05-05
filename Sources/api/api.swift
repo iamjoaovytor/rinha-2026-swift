@@ -77,7 +77,7 @@ struct RinhaAPI {
             }
             do {
                 let bodyBuffer = try await request.body.collect(upTo: 64 * 1024)
-                let body = bodyBuffer.getData(at: 0, length: bodyBuffer.readableBytes) ?? Data()
+                let body = Data(bodyBuffer.readableBytesView)
                 let fraudRequest = try JSONDecoder().decode(FraudRequest.self, from: body)
                 let raw = try loaded.vectorizer.vectorize(fraudRequest)
                 let quantized = loaded.vectorizer.quantize(raw)

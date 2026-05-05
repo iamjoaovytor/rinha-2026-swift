@@ -1,4 +1,3 @@
-import CryptoKit
 import Domain
 import Foundation
 
@@ -7,14 +6,17 @@ import Foundation
 // Pipeline (offline, runs outside the runtime container):
 //   1. Read the input file. If suffixed `.gz` it is decompressed via
 //      `gunzip -c` to avoid linking zlib.
-//   2. SHA-256 the raw input file bytes (gz when present) so the binary
-//      header records exactly which dataset produced this artifact.
-//   3. Parse the top-level JSON array of `{"vector":[14 nums],
+//   2. Parse the top-level JSON array of `{"vector":[14 nums],
 //      "label":"fraud"|"legit"}` via `JSONSerialization`.
-//   4. Quantize each vector to 16-lane Int16 (scale=8192) via
+//   3. Quantize each vector to 16-lane Int16 (scale=8192) via
 //      `Domain.Vectorizer.quantize`.
-//   5. Write `references.bin`: 128-byte header + page-aligned blocks of
+//   4. Write `references.bin`: 128-byte header + page-aligned blocks of
 //      labels (u8), orig_ids (u32 LE), vectors (i16 LE, AoS, stride 16).
+//
+// SHA-256 of the gz lives in `resources/references.sha256` alongside the
+// dataset, captured via `shasum -a 256`. We keep the 32-byte slot in the
+// header reserved for it but write zeros — adding a Crypto dependency for
+// a one-off offline tool isn't worth the build cost.
 
 enum Preprocess {
     static let magic: [UInt8] = [0x52, 0x4E, 0x48, 0x41] // "RNHA"
@@ -31,13 +33,8 @@ func die(_ message: String, code: Int32 = 1) -> Never {
     exit(code)
 }
 
-func readInput(_ path: String) throws -> (raw: Data, sha256: Data) {
+func readInput(_ path: String) throws -> Data {
     let url = URL(fileURLWithPath: path)
-    let fileData = try Data(contentsOf: url)
-    let digest = SHA256.hash(data: fileData)
-    let sha = Data(digest)
-
-    let payload: Data
     if path.hasSuffix(".gz") {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/gunzip")
@@ -46,15 +43,14 @@ func readInput(_ path: String) throws -> (raw: Data, sha256: Data) {
         process.standardOutput = pipe
         process.standardError = FileHandle.standardError
         try process.run()
-        payload = pipe.fileHandleForReading.readDataToEndOfFile()
+        let payload = pipe.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
         if process.terminationStatus != 0 {
             die("gunzip failed with status \(process.terminationStatus)")
         }
-    } else {
-        payload = fileData
+        return payload
     }
-    return (payload, sha)
+    return try Data(contentsOf: url)
 }
 
 extension Data {
@@ -88,8 +84,8 @@ let outputPath = arguments[2]
 let started = Date()
 FileHandle.standardError.write(Data("preprocess: reading \(inputPath)\n".utf8))
 
-let (rawJSON, sha256) = try readInput(inputPath)
-FileHandle.standardError.write(Data("preprocess: input sha256=\(sha256.map { String(format: "%02x", $0) }.joined())\n".utf8))
+let rawJSON = try readInput(inputPath)
+let sha256 = Data(repeating: 0, count: 32)
 FileHandle.standardError.write(Data("preprocess: decoded \(rawJSON.count) bytes; parsing JSON\n".utf8))
 
 let parsed = try JSONSerialization.jsonObject(with: rawJSON, options: [])
