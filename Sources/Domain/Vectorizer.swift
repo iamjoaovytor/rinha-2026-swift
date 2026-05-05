@@ -2,17 +2,35 @@ import Foundation
 
 /// MCC → risk lookup loaded from `mcc_risk.json`. Missing keys fall back to
 /// `defaultValue` (0.5 per spec).
-struct MccRiskTable: Sendable {
+public struct MccRiskTable: Sendable {
     private let table: [String: Double]
-    let defaultValue: Double
+    public let defaultValue: Double
 
-    init(_ table: [String: Double] = [:], defaultValue: Double = 0.5) {
+    public init(_ table: [String: Double] = [:], defaultValue: Double = 0.5) {
         self.table = table
         self.defaultValue = defaultValue
     }
 
-    func risk(for mcc: String) -> Double {
+    public func risk(for mcc: String) -> Double {
         table[mcc] ?? defaultValue
+    }
+
+    public static func load(path: String) throws -> MccRiskTable {
+        let data = try Data(contentsOf: URL(fileURLWithPath: path))
+        let parsed = try JSONSerialization.jsonObject(with: data, options: [])
+        guard let dict = parsed as? [String: Any] else {
+            throw NSError(
+                domain: "Domain.MccRiskTable", code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "expected JSON object at \(path)"]
+            )
+        }
+        var table = [String: Double](minimumCapacity: dict.count)
+        for (key, value) in dict {
+            if let d = value as? Double { table[key] = d }
+            else if let n = value as? NSNumber { table[key] = n.doubleValue }
+            else if let i = value as? Int { table[key] = Double(i) }
+        }
+        return MccRiskTable(table)
     }
 }
 
@@ -36,9 +54,14 @@ public struct Vectorizer: Sendable {
         self.mccRisk = MccRiskTable()
     }
 
+    public init(mccRisk: MccRiskTable) {
+        self.constants = .default
+        self.mccRisk = mccRisk
+    }
+
     public var scale: Int16 { constants.scale }
 
-    func vectorize(_ request: FraudRequest) throws -> [Double] {
+    public func vectorize(_ request: FraudRequest) throws -> [Double] {
         let txTime = try ISO8601Fixed.parse(request.transaction.requestedAt)
         var v = [Double](repeating: 0, count: 14)
 

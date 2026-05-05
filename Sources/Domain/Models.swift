@@ -1,12 +1,28 @@
 import Foundation
 
-struct FraudRequest: Decodable, Sendable {
-    let id: String
-    let transaction: TransactionPayload
-    let customer: CustomerPayload
-    let merchant: MerchantPayload
-    let terminal: TerminalPayload
-    let lastTransaction: LastTransactionPayload?
+public struct FraudRequest: Decodable, Sendable {
+    public let id: String
+    public let transaction: TransactionPayload
+    public let customer: CustomerPayload
+    public let merchant: MerchantPayload
+    public let terminal: TerminalPayload
+    public let lastTransaction: LastTransactionPayload?
+
+    public init(
+        id: String,
+        transaction: TransactionPayload,
+        customer: CustomerPayload,
+        merchant: MerchantPayload,
+        terminal: TerminalPayload,
+        lastTransaction: LastTransactionPayload?
+    ) {
+        self.id = id
+        self.transaction = transaction
+        self.customer = customer
+        self.merchant = merchant
+        self.terminal = terminal
+        self.lastTransaction = lastTransaction
+    }
 
     enum CodingKeys: String, CodingKey {
         case id, transaction, customer, merchant, terminal
@@ -14,10 +30,16 @@ struct FraudRequest: Decodable, Sendable {
     }
 }
 
-struct TransactionPayload: Decodable, Sendable {
-    let amount: Double
-    let installments: Int
-    let requestedAt: String
+public struct TransactionPayload: Decodable, Sendable {
+    public let amount: Double
+    public let installments: Int
+    public let requestedAt: String
+
+    public init(amount: Double, installments: Int, requestedAt: String) {
+        self.amount = amount
+        self.installments = installments
+        self.requestedAt = requestedAt
+    }
 
     enum CodingKeys: String, CodingKey {
         case amount, installments
@@ -25,10 +47,16 @@ struct TransactionPayload: Decodable, Sendable {
     }
 }
 
-struct CustomerPayload: Decodable, Sendable {
-    let avgAmount: Double
-    let txCount24h: Int
-    let knownMerchants: [String]
+public struct CustomerPayload: Decodable, Sendable {
+    public let avgAmount: Double
+    public let txCount24h: Int
+    public let knownMerchants: [String]
+
+    public init(avgAmount: Double, txCount24h: Int, knownMerchants: [String]) {
+        self.avgAmount = avgAmount
+        self.txCount24h = txCount24h
+        self.knownMerchants = knownMerchants
+    }
 
     enum CodingKeys: String, CodingKey {
         case avgAmount = "avg_amount"
@@ -37,10 +65,16 @@ struct CustomerPayload: Decodable, Sendable {
     }
 }
 
-struct MerchantPayload: Decodable, Sendable {
-    let id: String
-    let mcc: String
-    let avgAmount: Double
+public struct MerchantPayload: Decodable, Sendable {
+    public let id: String
+    public let mcc: String
+    public let avgAmount: Double
+
+    public init(id: String, mcc: String, avgAmount: Double) {
+        self.id = id
+        self.mcc = mcc
+        self.avgAmount = avgAmount
+    }
 
     enum CodingKeys: String, CodingKey {
         case id, mcc
@@ -48,10 +82,16 @@ struct MerchantPayload: Decodable, Sendable {
     }
 }
 
-struct TerminalPayload: Decodable, Sendable {
-    let isOnline: Bool
-    let cardPresent: Bool
-    let kmFromHome: Double
+public struct TerminalPayload: Decodable, Sendable {
+    public let isOnline: Bool
+    public let cardPresent: Bool
+    public let kmFromHome: Double
+
+    public init(isOnline: Bool, cardPresent: Bool, kmFromHome: Double) {
+        self.isOnline = isOnline
+        self.cardPresent = cardPresent
+        self.kmFromHome = kmFromHome
+    }
 
     enum CodingKeys: String, CodingKey {
         case isOnline = "is_online"
@@ -60,9 +100,14 @@ struct TerminalPayload: Decodable, Sendable {
     }
 }
 
-struct LastTransactionPayload: Decodable, Sendable {
-    let timestamp: String
-    let kmFromCurrent: Double
+public struct LastTransactionPayload: Decodable, Sendable {
+    public let timestamp: String
+    public let kmFromCurrent: Double
+
+    public init(timestamp: String, kmFromCurrent: Double) {
+        self.timestamp = timestamp
+        self.kmFromCurrent = kmFromCurrent
+    }
 
     enum CodingKeys: String, CodingKey {
         case timestamp
@@ -70,9 +115,14 @@ struct LastTransactionPayload: Decodable, Sendable {
     }
 }
 
-struct FraudResponse: Encodable, Sendable {
-    let approved: Bool
-    let fraudScore: Double
+public struct FraudResponse: Encodable, Sendable {
+    public let approved: Bool
+    public let fraudScore: Double
+
+    public init(approved: Bool, fraudScore: Double) {
+        self.approved = approved
+        self.fraudScore = fraudScore
+    }
 
     enum CodingKeys: String, CodingKey {
         case approved

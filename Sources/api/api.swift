@@ -5,15 +5,21 @@ import Logging
 import NIOCore
 import NIOPosix
 
+struct LoadedState: Sendable {
+    let index: ReferencesIndex
+    let vectorizer: Vectorizer
+}
+
 actor LoaderState {
-    private var index: ReferencesIndex?
+    private var loaded: LoadedState?
     private var failure: String?
 
-    var isReady: Bool { index != nil }
+    var current: LoadedState? { loaded }
+    var isReady: Bool { loaded != nil }
     var lastError: String? { failure }
 
-    func install(_ index: ReferencesIndex) {
-        self.index = index
+    func install(_ state: LoadedState) {
+        self.loaded = state
     }
 
     func recordFailure(_ message: String) {
@@ -24,6 +30,8 @@ actor LoaderState {
 @main
 struct RinhaAPI {
     static let referencesPathDefault = "/app/resources/references.bin"
+    static let mccRiskPathDefault = "/app/resources/mcc_risk.json"
+    static let fallbackBody = #"{"approved":false,"fraud_score":1.0}"#
 
     static func main() async throws {
         LoggingSystem.bootstrap { label in
@@ -34,14 +42,20 @@ struct RinhaAPI {
 
         let eventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         let state = LoaderState()
-        let referencesPath = ProcessInfo.processInfo.environment["REFERENCES_BIN"]
-            ?? referencesPathDefault
+        let env = ProcessInfo.processInfo.environment
+        let referencesPath = env["REFERENCES_BIN"] ?? referencesPathDefault
+        let mccRiskPath = env["MCC_RISK_JSON"] ?? mccRiskPathDefault
 
         Task.detached {
             do {
+                let mccRisk = try MccRiskTable.load(path: mccRiskPath)
                 let index = try ReferencesIndex.load(path: referencesPath)
                 index.warm()
-                await state.install(index)
+                let loaded = LoadedState(
+                    index: index,
+                    vectorizer: Vectorizer(mccRisk: mccRisk)
+                )
+                await state.install(loaded)
                 FileHandle.standardError.write(Data(
                     "loader: ready (count=\(index.header.count), scale=\(index.header.scale))\n".utf8
                 ))
@@ -57,9 +71,28 @@ struct RinhaAPI {
             await state.isReady ? .ok : .serviceUnavailable
         }
 
-        router.post("/fraud-score") { _, _ -> Response in
-            // Temporary safe fallback until vectorization and KNN are implemented.
-            jsonResponse(body: #"{"approved":false,"fraud_score":1.0}"#)
+        router.post("/fraud-score") { request, context -> Response in
+            guard let loaded = await state.current else {
+                return jsonResponse(body: fallbackBody)
+            }
+            do {
+                let bodyBuffer = try await request.body.collect(upTo: 64 * 1024)
+                let body = bodyBuffer.getData(at: 0, length: bodyBuffer.readableBytes) ?? Data()
+                let fraudRequest = try JSONDecoder().decode(FraudRequest.self, from: body)
+                let raw = try loaded.vectorizer.vectorize(fraudRequest)
+                let quantized = loaded.vectorizer.quantize(raw)
+                let neighbors = KNN.topK(query: quantized, in: loaded.index, k: 5)
+                let result = FraudScoring.score(neighbors: neighbors, index: loaded.index)
+                let payload = FraudResponse(
+                    approved: result.approved,
+                    fraudScore: result.fraudScore
+                )
+                let encoded = try JSONEncoder().encode(payload)
+                return jsonResponse(body: encoded)
+            } catch {
+                context.logger.debug("fraud-score: \(error)")
+                return jsonResponse(body: fallbackBody)
+            }
         }
 
         var logger = Logger(label: "rinha-api")
@@ -101,8 +134,17 @@ struct RinhaAPI {
     private static func jsonResponse(body: String) -> Response {
         var buffer = ByteBufferAllocator().buffer(capacity: body.utf8.count)
         buffer.writeString(body)
+        return makeResponse(buffer: buffer)
+    }
 
-        return Response(
+    private static func jsonResponse(body: Data) -> Response {
+        var buffer = ByteBufferAllocator().buffer(capacity: body.count)
+        buffer.writeBytes(body)
+        return makeResponse(buffer: buffer)
+    }
+
+    private static func makeResponse(buffer: ByteBuffer) -> Response {
+        Response(
             status: .ok,
             headers: [
                 .contentType: "application/json",
