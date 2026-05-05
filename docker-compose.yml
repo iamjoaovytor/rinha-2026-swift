@@ -1,0 +1,44 @@
+services:
+  api1: &api
+    image: rinha-2026-swift:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      SOCKET_PATH: /run/sock/api1.sock
+    volumes:
+      - sock:/run/sock
+    deploy:
+      resources:
+        limits:
+          cpus: "0.65"
+          memory: "160MB"
+
+  api2:
+    <<: *api
+    environment:
+      SOCKET_PATH: /run/sock/api2.sock
+
+  lb:
+    image: haproxy:3.3-alpine
+    ports:
+      - "9999:9999"
+    volumes:
+      - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+      - sock:/run/sock
+    depends_on:
+      - api1
+      - api2
+    deploy:
+      resources:
+        limits:
+          cpus: "0.20"
+          memory: "30MB"
+
+volumes:
+  sock:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "size=4m,mode=0777"
