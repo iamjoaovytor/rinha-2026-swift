@@ -19,7 +19,7 @@ struct MccRiskTable: Sendable {
 /// Produces the canonical 14-dimensional fraud feature vector and its
 /// `Int16` quantized form. Indices 5 and 6 retain the `-1` sentinel when
 /// `last_transaction` is null — the spec forbids substituting them.
-struct Vectorizer: Sendable {
+public struct Vectorizer: Sendable {
     let constants: VectorizerConstants
     let mccRisk: MccRiskTable
 
@@ -30,6 +30,13 @@ struct Vectorizer: Sendable {
         self.constants = constants
         self.mccRisk = mccRisk
     }
+
+    public init() {
+        self.constants = .default
+        self.mccRisk = MccRiskTable()
+    }
+
+    public var scale: Int16 { constants.scale }
 
     func vectorize(_ request: FraudRequest) throws -> [Double] {
         let txTime = try ISO8601Fixed.parse(request.transaction.requestedAt)
@@ -70,7 +77,7 @@ struct Vectorizer: Sendable {
 
     /// 16-lane `Int16` quantization (14 dims + 2 padding). Final two lanes
     /// stay zero so SIMD loops can read aligned 16-element strides.
-    func quantize(_ vector: [Double]) -> [Int16] {
+    public func quantize(_ vector: [Double]) -> [Int16] {
         precondition(vector.count == 14, "Vector must have 14 dimensions")
         var lanes = [Int16](repeating: 0, count: 16)
         let scaleDouble = Double(constants.scale)
