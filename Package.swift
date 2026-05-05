@@ -9,7 +9,9 @@ let package = Package(
         .macOS(.v14)
     ],
     products: [
-        .executable(name: "api", targets: ["api"])
+        .executable(name: "api", targets: ["api"]),
+        .executable(name: "preprocess", targets: ["preprocess"]),
+        .library(name: "Domain", targets: ["Domain"])
     ],
     dependencies: [
         .package(url: "https://github.com/hummingbird-project/hummingbird.git", from: "2.22.0"),
@@ -17,16 +19,26 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-nio.git", "2.65.0"..<"2.87.0")
     ],
     targets: [
+        .target(
+            name: "Domain"
+        ),
         .executableTarget(
             name: "api",
             dependencies: [
+                "Domain",
                 .product(name: "Hummingbird", package: "hummingbird"),
-                .product(name: "Logging", package: "swift-log")
+                .product(name: "Logging", package: "swift-log"),
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio")
             ]
         ),
+        .executableTarget(
+            name: "preprocess",
+            dependencies: ["Domain"]
+        ),
         .testTarget(
-            name: "apiTests",
-            dependencies: ["api"]
+            name: "DomainTests",
+            dependencies: ["Domain"]
         ),
     ],
     swiftLanguageModes: [.v6]

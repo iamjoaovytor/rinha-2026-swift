@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-@testable import api
+@testable import Domain
 
 struct ISO8601Tests {
     @Test func parsesCanonicalFormat() throws {
