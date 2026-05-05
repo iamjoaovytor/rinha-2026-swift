@@ -1,0 +1,11 @@
+.git
+.build
+.swiftpm
+DerivedData
+*.xcodeproj
+PLAN.md
+.netrc
+.DS_Store
+resources/example-references.json
+resources/example-references.bin
+resources/references.json.gz

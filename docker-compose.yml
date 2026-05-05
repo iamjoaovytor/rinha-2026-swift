@@ -21,6 +21,7 @@ services:
 
   lb:
     image: haproxy:3.3-alpine
+    user: "0:0"
     ports:
       - "9999:9999"
     volumes:
