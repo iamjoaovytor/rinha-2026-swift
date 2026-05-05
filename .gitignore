@@ -8,3 +8,4 @@ DerivedData/
 .netrc
 PLAN.md
 /resources/
+/test/results.json

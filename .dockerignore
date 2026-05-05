@@ -6,6 +6,6 @@ DerivedData
 PLAN.md
 .netrc
 .DS_Store
+test
 resources/example-references.json
 resources/example-references.bin
-resources/references.json.gz

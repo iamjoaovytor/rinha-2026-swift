@@ -1,17 +1,21 @@
 services:
   api1: &api
-    image: rinha-2026-swift:latest
+    image: rinha-2026-swift:local
+    platform: linux/amd64
     build:
       context: .
       dockerfile: Dockerfile
+      target: runtime-local
     environment:
       SOCKET_PATH: /run/sock/api1.sock
     volumes:
       - sock:/run/sock
+    cpus: "0.40"
+    mem_limit: "160MB"
     deploy:
       resources:
         limits:
-          cpus: "0.65"
+          cpus: "0.40"
           memory: "160MB"
 
   api2:
@@ -30,6 +34,8 @@ services:
     depends_on:
       - api1
       - api2
+    cpus: "0.20"
+    mem_limit: "30MB"
     deploy:
       resources:
         limits:
