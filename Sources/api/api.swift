@@ -1,11 +1,30 @@
+import Domain
 import Foundation
 import Hummingbird
 import Logging
 import NIOCore
 import NIOPosix
 
+actor LoaderState {
+    private var index: ReferencesIndex?
+    private var failure: String?
+
+    var isReady: Bool { index != nil }
+    var lastError: String? { failure }
+
+    func install(_ index: ReferencesIndex) {
+        self.index = index
+    }
+
+    func recordFailure(_ message: String) {
+        self.failure = message
+    }
+}
+
 @main
 struct RinhaAPI {
+    static let referencesPathDefault = "/app/resources/references.bin"
+
     static func main() async throws {
         LoggingSystem.bootstrap { label in
             var handler = StreamLogHandler.standardOutput(label: label)
@@ -14,10 +33,28 @@ struct RinhaAPI {
         }
 
         let eventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        let state = LoaderState()
+        let referencesPath = ProcessInfo.processInfo.environment["REFERENCES_BIN"]
+            ?? referencesPathDefault
+
+        Task.detached {
+            do {
+                let index = try ReferencesIndex.load(path: referencesPath)
+                index.warm()
+                await state.install(index)
+                FileHandle.standardError.write(Data(
+                    "loader: ready (count=\(index.header.count), scale=\(index.header.scale))\n".utf8
+                ))
+            } catch {
+                let message = "\(error)"
+                await state.recordFailure(message)
+                FileHandle.standardError.write(Data("loader: \(message)\n".utf8))
+            }
+        }
 
         let router = Router()
         router.get("/ready") { _, _ -> HTTPResponse.Status in
-            .ok
+            await state.isReady ? .ok : .serviceUnavailable
         }
 
         router.post("/fraud-score") { _, _ -> Response in
