@@ -4,15 +4,27 @@ import Foundation
 /// `defaultValue` (0.5 per spec).
 public struct MccRiskTable: Sendable {
     private let table: [String: Double]
+    private let numericTable: [Int: Double]
     public let defaultValue: Double
 
     public init(_ table: [String: Double] = [:], defaultValue: Double = 0.5) {
         self.table = table
+        var numericTable = [Int: Double](minimumCapacity: table.count)
+        for (key, value) in table {
+            if let code = Int(key) {
+                numericTable[code] = value
+            }
+        }
+        self.numericTable = numericTable
         self.defaultValue = defaultValue
     }
 
     public func risk(for mcc: String) -> Double {
         table[mcc] ?? defaultValue
+    }
+
+    public func risk(for mcc: Int) -> Double {
+        numericTable[mcc] ?? defaultValue
     }
 
     public static func load(path: String) throws -> MccRiskTable {
@@ -98,6 +110,56 @@ public struct Vectorizer: Sendable {
         return v
     }
 
+    func quantize(
+        transactionAmount: Double,
+        installments: Int,
+        requestedAt: ISO8601Fixed,
+        customerAvgAmount: Double,
+        customerTxCount24h: Int,
+        knownMerchant: Bool,
+        merchantAvgAmount: Double,
+        terminalIsOnline: Bool,
+        terminalCardPresent: Bool,
+        terminalKmFromHome: Double,
+        merchantMccCode: Int,
+        lastTransaction: (timestamp: ISO8601Fixed, kmFromCurrent: Double)?
+    ) -> [Int16] {
+        var lanes = [Int16](repeating: 0, count: 16)
+
+        lanes[0] = quantizeUnitInterval(transactionAmount / constants.maxAmount)
+        lanes[1] = quantizeUnitInterval(Double(installments) / constants.maxInstallments)
+
+        let amountVsAvg: Double
+        if customerAvgAmount > 0 {
+            amountVsAvg = (transactionAmount / customerAvgAmount) / constants.amountVsAvgRatio
+        } else {
+            amountVsAvg = 1.0
+        }
+        lanes[2] = quantizeUnitInterval(amountVsAvg)
+        lanes[3] = quantizeUnitInterval(Double(requestedAt.hour) / 23.0)
+        lanes[4] = quantizeUnitInterval(Double(requestedAt.weekdayMon0) / 6.0)
+
+        if let lastTransaction {
+            let deltaSeconds = max(0, requestedAt.epochSeconds - lastTransaction.timestamp.epochSeconds)
+            let minutes = Double(deltaSeconds) / 60.0
+            lanes[5] = quantizeUnitInterval(minutes / constants.maxMinutes)
+            lanes[6] = quantizeUnitInterval(lastTransaction.kmFromCurrent / constants.maxKm)
+        } else {
+            lanes[5] = -constants.scale
+            lanes[6] = -constants.scale
+        }
+
+        lanes[7] = quantizeUnitInterval(terminalKmFromHome / constants.maxKm)
+        lanes[8] = quantizeUnitInterval(Double(customerTxCount24h) / constants.maxTxCount24h)
+        lanes[9] = terminalIsOnline ? constants.scale : 0
+        lanes[10] = terminalCardPresent ? constants.scale : 0
+        lanes[11] = knownMerchant ? 0 : constants.scale
+        lanes[12] = quantizeUnitInterval(mccRisk.risk(for: merchantMccCode))
+        lanes[13] = quantizeUnitInterval(merchantAvgAmount / constants.maxMerchantAvgAmount)
+
+        return lanes
+    }
+
     /// 16-lane `Int16` quantization (14 dims + 2 padding). Final two lanes
     /// stay zero so SIMD loops can read aligned 16-element strides.
     public func quantize(_ vector: [Double]) -> [Int16] {
@@ -122,5 +184,12 @@ public struct Vectorizer: Sendable {
     @inline(__always)
     private func clamp(_ x: Double) -> Double {
         min(1.0, max(0.0, x))
+    }
+
+    @inline(__always)
+    private func quantizeUnitInterval(_ x: Double) -> Int16 {
+        let scaleDouble = Double(constants.scale)
+        let clamped = clamp(x)
+        return Int16((clamped * scaleDouble).rounded())
     }
 }

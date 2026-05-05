@@ -20,7 +20,12 @@ let package = Package(
     ],
     targets: [
         .target(
-            name: "Domain"
+            name: "Domain",
+            dependencies: ["CSearch"]
+        ),
+        .target(
+            name: "CSearch",
+            publicHeadersPath: "include"
         ),
         .executableTarget(
             name: "api",
@@ -28,6 +33,7 @@ let package = Package(
                 "Domain",
                 .product(name: "Hummingbird", package: "hummingbird"),
                 .product(name: "Logging", package: "swift-log"),
+                .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio")
             ]

@@ -44,6 +44,25 @@ struct SearchTests {
         #expect(neighbors[1].recordIndex == 1)
     }
 
+    @Test func nativeTopKMatchesSwiftOracle() throws {
+        let records: [(vector: [Int16], label: UInt8)] = [
+            (vector: [12, -3, 8, 0, 5, 1, 2, -7, 9, 4, 0, 3, 6, -2, 0, 0], label: 0),
+            (vector: [11, -1, 9, 0, 4, 1, 3, -7, 10, 5, 0, 2, 7, -2, 0, 0], label: 1),
+            (vector: [100, 40, -30, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], label: 0),
+            (vector: [13, -2, 7, 0, 5, 1, 2, -6, 8, 4, 0, 3, 6, -1, 0, 0], label: 1),
+            (vector: [-50, 8, 9, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0, 0], label: 0),
+        ]
+        let url = try writeReferences(records)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let index = try ReferencesIndex.load(path: url.path)
+
+        let query: [Int16] = [12, -2, 8, 0, 5, 1, 2, -7, 9, 4, 0, 3, 6, -2, 0, 0]
+        let native = KNN.topK(query: query, in: index, k: 4)
+        let swift = KNN.topKSwift(query: query, in: index, k: 4)
+
+        #expect(native == swift)
+    }
+
     @Test func scoreFlagsMajorityFraudAndDenies() throws {
         let records: [(vector: [Int16], label: UInt8)] = [
             (vector: [Int16](repeating: 0, count: 16), label: 1),
@@ -81,6 +100,7 @@ struct SearchTests {
         #expect(abs(result.fraudScore - 0.4) < 1e-9)
         #expect(result.approved == true)
     }
+
 
     private func writeReferences(_ records: [(vector: [Int16], label: UInt8)]) throws -> URL {
         let url = FileManager.default.temporaryDirectory

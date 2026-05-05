@@ -7,9 +7,7 @@ services:
       dockerfile: Dockerfile
       target: runtime-local
     environment:
-      SOCKET_PATH: /run/sock/api1.sock
-    volumes:
-      - sock:/run/sock
+      PORT: "3001"
     cpus: "0.40"
     mem_limit: "160MB"
     deploy:
@@ -21,7 +19,7 @@ services:
   api2:
     <<: *api
     environment:
-      SOCKET_PATH: /run/sock/api2.sock
+      PORT: "3002"
 
   lb:
     image: haproxy:3.3-alpine
@@ -30,7 +28,6 @@ services:
       - "9999:9999"
     volumes:
       - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
-      - sock:/run/sock
     depends_on:
       - api1
       - api2
@@ -41,11 +38,3 @@ services:
         limits:
           cpus: "0.20"
           memory: "30MB"
-
-volumes:
-  sock:
-    driver: local
-    driver_opts:
-      type: tmpfs
-      device: tmpfs
-      o: "size=4m,mode=0777"

@@ -63,6 +63,12 @@ struct ISO8601Fixed: Sendable, Equatable {
     }
 
     static func parse(bytes: [UInt8]) throws -> ISO8601Fixed {
+        try bytes.withUnsafeBufferPointer {
+            try parse(bytes: $0)
+        }
+    }
+
+    static func parse(bytes: UnsafeBufferPointer<UInt8>) throws -> ISO8601Fixed {
         guard bytes.count == 20 else { throw ParseError.wrongLength }
         guard
             bytes[4] == 0x2D, bytes[7] == 0x2D, bytes[10] == 0x54,

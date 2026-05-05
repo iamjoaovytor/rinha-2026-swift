@@ -1,3 +1,4 @@
+import CSearch
 import Foundation
 
 /// Result of a single nearest-neighbor probe against `references.bin`.
@@ -24,12 +25,72 @@ public struct ScoreResult: Sendable, Equatable {
 }
 
 public enum KNN {
-    /// Pure Swift exact k-NN against the `references.bin` mapping. Slow at
-    /// 3M × 14 dims (oracle baseline; replace with C+SIMD before going to
-    /// production). Distances are computed in Int64 over `dim` lanes; the
-    /// padding lanes 14 and 15 are zero on both sides so they would not
-    /// shift the result, but we skip them to save eight multiplies.
+    /// Exact k-NN against the `references.bin` mapping using a native C
+    /// kernel. On x86_64 the kernel switches to AVX2 when supported at
+    /// runtime; other architectures stay on the scalar C path.
     public static func topK(
+        query: [Int16],
+        in index: ReferencesIndex,
+        k: Int = 5
+    ) -> [Neighbor] {
+        withTopKRaw(query: query, in: index, k: k) { rawNeighbors in
+            rawNeighbors.map {
+                Neighbor(
+                    recordIndex: Int($0.record_index),
+                    distanceSquared: $0.distance_squared
+                )
+            }
+        }
+    }
+
+    public static func fraudVoteCount(
+        query: [Int16],
+        in index: ReferencesIndex,
+        k: Int = 5
+    ) -> Int {
+        withTopKRaw(query: query, in: index, k: k) { rawNeighbors in
+            let labels = index.labels
+            var fraudVotes = 0
+            for neighbor in rawNeighbors where labels[Int(neighbor.record_index)] == 1 {
+                fraudVotes += 1
+            }
+            return fraudVotes
+        }
+    }
+
+    private static func withTopKRaw<T>(
+        query: [Int16],
+        in index: ReferencesIndex,
+        k: Int,
+        _ body: (UnsafeBufferPointer<rinha_neighbor_t>) -> T
+    ) -> T {
+        precondition(query.count == index.header.stride,
+                     "query lanes must match index stride")
+        precondition(k > 0, "k must be positive")
+
+        let count = index.header.count
+        let k = min(k, count)
+        precondition(k > 0, "index must not be empty")
+
+        return withUnsafeTemporaryAllocation(of: rinha_neighbor_t.self, capacity: k) { rawNeighbors in
+            query.withUnsafeBufferPointer { queryBuffer in
+                rinha_topk_exact_i16(
+                    queryBuffer.baseAddress,
+                    index.vectors.baseAddress,
+                    numericCast(index.header.count),
+                    numericCast(index.header.dim),
+                    numericCast(index.header.stride),
+                    numericCast(k),
+                    rawNeighbors.baseAddress
+                )
+                return body(UnsafeBufferPointer(start: rawNeighbors.baseAddress, count: k))
+            }
+        }
+    }
+
+    /// Swift oracle kept for tests and benchmarking while the native kernel
+    /// takes over production traffic.
+    static func topKSwift(
         query: [Int16],
         in index: ReferencesIndex,
         k: Int = 5
@@ -42,6 +103,8 @@ public enum KNN {
         let stride = index.header.stride
         let dim = index.header.dim
         let vectors = index.vectors
+        let k = min(k, count)
+        guard k > 0 else { return [] }
 
         var top = [Neighbor]()
         top.reserveCapacity(k)
@@ -59,7 +122,7 @@ public enum KNN {
                     let diff = q - r
                     sum &+= Int64(diff &* diff)
                 }
-                insert(
+                insertSwift(
                     Neighbor(recordIndex: record, distanceSquared: sum),
                     into: &top, capacity: k
                 )
@@ -69,16 +132,13 @@ public enum KNN {
         return top
     }
 
-    /// Inserts `candidate` into a max-distance heap-like array kept in
-    /// ascending order. Cheap because `k` is tiny (5).
     @inline(__always)
-    private static func insert(
+    private static func insertSwift(
         _ candidate: Neighbor,
         into top: inout [Neighbor],
         capacity: Int
     ) {
         if top.count < capacity {
-            // Insertion sort entry; small k keeps cost negligible.
             var i = top.count
             top.append(candidate)
             while i > 0, top[i - 1].distanceSquared > candidate.distanceSquared {
@@ -102,6 +162,14 @@ public enum KNN {
 
 public enum FraudScoring {
     public static let approvalThreshold: Double = 0.5
+    private static let responseBodies = [
+        #"{"approved":true,"fraud_score":0.0}"#,
+        #"{"approved":true,"fraud_score":0.2}"#,
+        #"{"approved":true,"fraud_score":0.4}"#,
+        #"{"approved":false,"fraud_score":0.6}"#,
+        #"{"approved":false,"fraud_score":0.8}"#,
+        #"{"approved":false,"fraud_score":1.0}"#
+    ]
 
     /// Reduces `topNeighbors` to a fraud score using majority vote among
     /// labels and approves below `approvalThreshold`. Spec uses k=5, so the
@@ -111,11 +179,7 @@ public enum FraudScoring {
         index: ReferencesIndex
     ) -> ScoreResult {
         precondition(!neighbors.isEmpty, "need at least one neighbor")
-        let labels = index.labels
-        var fraudVotes = 0
-        for neighbor in neighbors where labels[neighbor.recordIndex] == 1 {
-            fraudVotes += 1
-        }
+        let fraudVotes = fraudVoteCount(neighbors: neighbors, index: index)
         let fraudScore = Double(fraudVotes) / Double(neighbors.count)
         let approved = fraudScore < approvalThreshold
         return ScoreResult(
@@ -123,5 +187,30 @@ public enum FraudScoring {
             fraudScore: fraudScore,
             topNeighbors: neighbors
         )
+    }
+
+    public static func responseBody(
+        neighbors: [Neighbor],
+        index: ReferencesIndex
+    ) -> String {
+        responseBody(fraudVoteCount: fraudVoteCount(neighbors: neighbors, index: index))
+    }
+
+    public static func responseBody(fraudVoteCount: Int) -> String {
+        responseBodies[fraudVoteCount]
+    }
+
+    @inline(__always)
+    private static func fraudVoteCount(
+        neighbors: [Neighbor],
+        index: ReferencesIndex
+    ) -> Int {
+        precondition(!neighbors.isEmpty, "need at least one neighbor")
+        let labels = index.labels
+        var fraudVotes = 0
+        for neighbor in neighbors where labels[neighbor.recordIndex] == 1 {
+            fraudVotes += 1
+        }
+        return fraudVotes
     }
 }

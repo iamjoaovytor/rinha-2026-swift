@@ -2,6 +2,7 @@ import Domain
 import Foundation
 import Hummingbird
 import Logging
+import NIOConcurrencyHelpers
 import NIOCore
 import NIOPosix
 
@@ -10,20 +11,38 @@ struct LoadedState: Sendable {
     let vectorizer: Vectorizer
 }
 
-actor LoaderState {
-    private var loaded: LoadedState?
-    private var failure: String?
+final class LoaderState: @unchecked Sendable {
+    private struct State {
+        var loaded: LoadedState?
+        var failure: String?
+    }
 
-    var current: LoadedState? { loaded }
-    var isReady: Bool { loaded != nil }
-    var lastError: String? { failure }
+    private let state = NIOLockedValueBox(State())
 
-    func install(_ state: LoadedState) {
-        self.loaded = state
+    var current: LoadedState? {
+        self.state.withLockedValue { $0.loaded }
+    }
+
+    var isReady: Bool {
+        self.state.withLockedValue { $0.loaded != nil }
+    }
+
+    var lastError: String? {
+        self.state.withLockedValue { $0.failure }
+    }
+
+    func install(_ loaded: LoadedState) {
+        self.state.withLockedValue { state in
+            state.loaded = loaded
+            state.failure = nil
+        }
     }
 
     func recordFailure(_ message: String) {
-        self.failure = message
+        self.state.withLockedValue { state in
+            state.failure = message
+            state.loaded = nil
+        }
     }
 }
 
@@ -32,6 +51,7 @@ struct RinhaAPI {
     static let referencesPathDefault = "/app/resources/references.bin"
     static let mccRiskPathDefault = "/app/resources/mcc_risk.json"
     static let fallbackBody = #"{"approved":false,"fraud_score":1.0}"#
+    static let decoder = JSONDecoder()
 
     static func main() async throws {
         LoggingSystem.bootstrap { label in
@@ -55,40 +75,44 @@ struct RinhaAPI {
                     index: index,
                     vectorizer: Vectorizer(mccRisk: mccRisk)
                 )
-                await state.install(loaded)
+                state.install(loaded)
                 FileHandle.standardError.write(Data(
                     "loader: ready (count=\(index.header.count), scale=\(index.header.scale))\n".utf8
                 ))
             } catch {
                 let message = "\(error)"
-                await state.recordFailure(message)
+                state.recordFailure(message)
                 FileHandle.standardError.write(Data("loader: \(message)\n".utf8))
             }
         }
 
         let router = Router()
         router.get("/ready") { _, _ -> HTTPResponse.Status in
-            await state.isReady ? .ok : .serviceUnavailable
+            state.isReady ? .ok : .serviceUnavailable
         }
 
         router.post("/fraud-score") { request, context -> Response in
-            guard let loaded = await state.current else {
+            guard let loaded = state.current else {
                 return jsonResponse(body: fallbackBody)
             }
             do {
                 let bodyBuffer = try await request.body.collect(upTo: 64 * 1024)
-                let body = Data(bodyBuffer.readableBytesView)
-                let fraudRequest = try JSONDecoder().decode(FraudRequest.self, from: body)
-                let raw = try loaded.vectorizer.vectorize(fraudRequest)
-                let quantized = loaded.vectorizer.quantize(raw)
-                let neighbors = KNN.topK(query: quantized, in: loaded.index, k: 5)
-                let result = FraudScoring.score(neighbors: neighbors, index: loaded.index)
-                let payload = FraudResponse(
-                    approved: result.approved,
-                    fraudScore: result.fraudScore
-                )
-                let encoded = try JSONEncoder().encode(payload)
-                return jsonResponse(body: encoded)
+                let quantized: [Int16]
+                do {
+                    quantized = try bodyBuffer.withUnsafeReadableBytes { rawBuffer in
+                        try FastRequestParser.quantizedQuery(
+                            from: rawBuffer,
+                            vectorizer: loaded.vectorizer
+                        )
+                    }
+                } catch {
+                    let body = Data(bodyBuffer.readableBytesView)
+                    let fraudRequest = try decoder.decode(FraudRequest.self, from: body)
+                    let raw = try loaded.vectorizer.vectorize(fraudRequest)
+                    quantized = loaded.vectorizer.quantize(raw)
+                }
+                let fraudVotes = KNN.fraudVoteCount(query: quantized, in: loaded.index, k: 5)
+                return jsonResponse(body: FraudScoring.responseBody(fraudVoteCount: fraudVotes))
             } catch {
                 context.logger.debug("fraud-score: \(error)")
                 return jsonResponse(body: fallbackBody)
@@ -101,7 +125,7 @@ struct RinhaAPI {
         let configuration = ApplicationConfiguration(
             address: bindAddress(),
             serverName: nil,
-            backlog: 4096
+            backlog: 16384
         )
 
         let app = Application(
