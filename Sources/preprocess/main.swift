@@ -26,11 +26,11 @@ enum Preprocess {
     static let layoutAoS: UInt32 = 0
     static let headerBytes = 128
     static let pageAlignment = 4096
-    static let defaultIVFClusters = 256
+    static let defaultIVFClusters = 1024
     static let defaultIVFTrainSample = 262_144
-    static let defaultIVFTrainIterations = 12
-    static let defaultIVFFullRefineIterations = 1
-    static let defaultIVFRestarts = 2
+    static let defaultIVFTrainIterations = 8
+    static let defaultIVFFullRefineIterations = 0
+    static let defaultIVFRestarts = 1
     static let defaultIVFSeed: UInt64 = 42
 }
 

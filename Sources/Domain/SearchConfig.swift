@@ -12,7 +12,7 @@ public struct SearchConfig: Sendable {
     }
 
     public init(
-        nprobe: Int = 4,
+        nprobe: Int = 8,
         initialNprobe: Int? = nil,
         adaptiveMinFraudVotes: Int = 2,
         adaptiveMaxFraudVotes: Int = 3,

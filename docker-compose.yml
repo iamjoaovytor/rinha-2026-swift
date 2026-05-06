@@ -7,8 +7,8 @@ services:
       dockerfile: Dockerfile
       target: runtime-local
     environment: &api_env
-      IVF_NPROBE: "${IVF_NPROBE:-4}"
-      IVF_INITIAL_NPROBE: "${IVF_INITIAL_NPROBE:-}"
+      IVF_NPROBE: "${IVF_NPROBE:-8}"
+      IVF_INITIAL_NPROBE: "${IVF_INITIAL_NPROBE:-6}"
       IVF_ADAPTIVE_MIN_VOTES: "${IVF_ADAPTIVE_MIN_VOTES:-2}"
       IVF_ADAPTIVE_MAX_VOTES: "${IVF_ADAPTIVE_MAX_VOTES:-3}"
       IVF_USE_BBOX: "${IVF_USE_BBOX:-0}"

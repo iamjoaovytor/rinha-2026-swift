@@ -11,23 +11,29 @@ COPY Tests ./Tests
 COPY resources ./resources
 
 FROM build-base AS build-local
-RUN mkdir -p /out/resources \
-    && swift build -c release \
-    && BIN=$(swift build -c release --show-bin-path) \
-    && cp "$BIN/api" /out/api \
+RUN --mount=type=cache,target=/root/.cache \
+    --mount=type=cache,target=/root/.swiftpm \
+    --mount=type=cache,target=/src/.build \
+    mkdir -p /out/resources \
+    && swift build -c release --product api \
+    && BIN_DIR=$(dirname "$(find /src/.build -type f -path '*/release/api' | head -n 1)") \
+    && cp "$BIN_DIR/api" /out/api \
     && cp /src/resources/references.bin /out/resources/references.bin \
     && cp /src/resources/mcc_risk.json /out/resources/mcc_risk.json \
     && if [ -f /src/resources/references.ivf ]; then cp /src/resources/references.ivf /out/resources/references.ivf; fi
 
 FROM build-base AS build-submission
 
-RUN swift build -c release \
+RUN --mount=type=cache,target=/root/.cache \
+    --mount=type=cache,target=/root/.swiftpm \
+    --mount=type=cache,target=/src/.build \
+    swift build -c release --product api --product preprocess \
     && cd /src/resources \
     && sha256sum -c references.sha256 \
     && mkdir -p /out/resources \
-    && BIN=$(swift build -c release --show-bin-path) \
-    && "$BIN/preprocess" /src/resources/references.json.gz /out/resources/references.bin \
-    && cp "$BIN/api" /out/api \
+    && BIN_DIR=$(dirname "$(find /src/.build -type f \\( -path '*/release/api' -o -path '*/release/preprocess' \\) | head -n 1)") \
+    && "$BIN_DIR/preprocess" /src/resources/references.json.gz /out/resources/references.bin \
+    && cp "$BIN_DIR/api" /out/api \
     && cp /src/resources/mcc_risk.json /out/resources/mcc_risk.json \
     && cp /out/resources/references.ivf /out/resources/references.ivf
 

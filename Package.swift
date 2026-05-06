@@ -21,10 +21,13 @@ let package = Package(
     targets: [
         .target(
             name: "Domain",
-            dependencies: ["CSearch"]
+            dependencies: ["CSearch"],
+            path: "Sources/Domain"
         ),
         .target(
             name: "CSearch",
+            path: "Sources/CSearch",
+            sources: ["CSearch.c"],
             publicHeadersPath: "include"
         ),
         .executableTarget(
@@ -36,15 +39,18 @@ let package = Package(
                 .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio")
-            ]
+            ],
+            path: "Sources/api"
         ),
         .executableTarget(
             name: "preprocess",
-            dependencies: ["Domain"]
+            dependencies: ["Domain"],
+            path: "Sources/preprocess"
         ),
         .testTarget(
             name: "DomainTests",
-            dependencies: ["Domain"]
+            dependencies: ["Domain"],
+            path: "Tests/DomainTests"
         ),
     ],
     swiftLanguageModes: [.v6]
