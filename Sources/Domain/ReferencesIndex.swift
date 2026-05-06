@@ -55,7 +55,7 @@ public enum ReferencesError: Error, Sendable, CustomStringConvertible {
 }
 
 @inline(__always)
-private func alignUp(_ value: Int, to alignment: Int) -> Int {
+func alignUp(_ value: Int, to alignment: Int) -> Int {
     (value + alignment - 1) / alignment * alignment
 }
 

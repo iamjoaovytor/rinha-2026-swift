@@ -101,6 +101,56 @@ struct SearchTests {
         #expect(result.approved == true)
     }
 
+    @Test func ivfRoundTripAndFraudVoteMatchesExactWhenProbingAllClusters() throws {
+        let records: [(vector: [Int16], label: UInt8)] = [
+            (vector: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], label: 0),
+            (vector: [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], label: 1),
+            (vector: [50, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], label: 1),
+            (vector: [52, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], label: 0),
+        ]
+        let referencesURL = try writeReferences(records)
+        let ivfURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ref-\(UUID().uuidString).ivf")
+        defer {
+            try? FileManager.default.removeItem(at: referencesURL)
+            try? FileManager.default.removeItem(at: ivfURL)
+        }
+
+        let centroids: [Int16] = [
+            1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            51, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ]
+        let offsets: [UInt32] = [0, 2, 4]
+        let postings: [UInt32] = [0, 1, 2, 3]
+        try writeIVF(
+            path: ivfURL,
+            count: records.count,
+            clusterCount: 2,
+            centroids: centroids,
+            offsets: offsets,
+            postings: postings
+        )
+
+        let index = try ReferencesIndex.load(path: referencesURL.path)
+        let ivf = try IVFIndex.load(path: ivfURL.path)
+
+        #expect(ivf.header.clusterCount == 2)
+        #expect(Array(ivf.clusterOffsets) == offsets)
+        #expect(Array(ivf.postings) == postings)
+
+        let query: [Int16] = [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        let exactFraudVotes = KNN.fraudVoteCount(query: query, in: index, k: 3)
+        let ivfFraudVotes = KNN.fraudVoteCount(
+            query: query,
+            in: index,
+            ivf: ivf,
+            config: SearchConfig(nprobe: 2),
+            k: 3
+        )
+
+        #expect(ivfFraudVotes == exactFraudVotes)
+    }
+
 
     private func writeReferences(_ records: [(vector: [Int16], label: UInt8)]) throws -> URL {
         let url = FileManager.default.temporaryDirectory
@@ -134,6 +184,35 @@ struct SearchTests {
 
         try data.write(to: url)
         return url
+    }
+
+    private func writeIVF(
+        path: URL,
+        count: Int,
+        clusterCount: Int,
+        centroids: [Int16],
+        offsets: [UInt32],
+        postings: [UInt32]
+    ) throws {
+        var data = Data()
+        data.append(contentsOf: [0x52, 0x49, 0x56, 0x46])
+        appendLE(UInt32(1), to: &data)
+        appendLE(UInt64(count), to: &data)
+        appendLE(UInt32(clusterCount), to: &data)
+        appendLE(UInt32(16), to: &data)
+        appendLE(Int64(0), to: &data)
+        if data.count < 64 {
+            data.append(Data(repeating: 0, count: 64 - data.count))
+        }
+
+        for lane in centroids { appendLE(lane, to: &data) }
+        padTo(alignment: 4096, in: &data)
+
+        for offset in offsets { appendLE(offset, to: &data) }
+        padTo(alignment: 4096, in: &data)
+
+        for posting in postings { appendLE(posting, to: &data) }
+        try data.write(to: path)
     }
 
     private func appendLE<T: FixedWidthInteger>(_ value: T, to data: inout Data) {

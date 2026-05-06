@@ -8,6 +8,8 @@ import NIOPosix
 
 struct LoadedState: Sendable {
     let index: ReferencesIndex
+    let ivf: IVFIndex?
+    let searchConfig: SearchConfig
     let vectorizer: Vectorizer
 }
 
@@ -65,19 +67,30 @@ struct RinhaAPI {
         let env = ProcessInfo.processInfo.environment
         let referencesPath = env["REFERENCES_BIN"] ?? referencesPathDefault
         let mccRiskPath = env["MCC_RISK_JSON"] ?? mccRiskPathDefault
+        let ivfPath = env["IVF_BIN"] ?? IVFIndex.defaultPath(for: referencesPath)
+        let nprobe = env["IVF_NPROBE"].flatMap(Int.init) ?? 4
 
         Task.detached {
             do {
                 let mccRisk = try MccRiskTable.load(path: mccRiskPath)
                 let index = try ReferencesIndex.load(path: referencesPath)
+                let ivf: IVFIndex?
+                if FileManager.default.fileExists(atPath: ivfPath) {
+                    ivf = try IVFIndex.load(path: ivfPath)
+                    ivf?.warm()
+                } else {
+                    ivf = nil
+                }
                 index.warm()
                 let loaded = LoadedState(
                     index: index,
+                    ivf: ivf,
+                    searchConfig: SearchConfig(nprobe: nprobe),
                     vectorizer: Vectorizer(mccRisk: mccRisk)
                 )
                 state.install(loaded)
                 FileHandle.standardError.write(Data(
-                    "loader: ready (count=\(index.header.count), scale=\(index.header.scale))\n".utf8
+                    "loader: ready (count=\(index.header.count), scale=\(index.header.scale), ivf=\(ivf != nil ? "on" : "off"), nprobe=\(nprobe))\n".utf8
                 ))
             } catch {
                 let message = "\(error)"
@@ -111,7 +124,13 @@ struct RinhaAPI {
                     let raw = try loaded.vectorizer.vectorize(fraudRequest)
                     quantized = loaded.vectorizer.quantize(raw)
                 }
-                let fraudVotes = KNN.fraudVoteCount(query: quantized, in: loaded.index, k: 5)
+                let fraudVotes = KNN.fraudVoteCount(
+                    query: quantized,
+                    in: loaded.index,
+                    ivf: loaded.ivf,
+                    config: loaded.searchConfig,
+                    k: 5
+                )
                 return jsonResponse(body: FraudScoring.responseBody(fraudVoteCount: fraudVotes))
             } catch {
                 context.logger.debug("fraud-score: \(error)")

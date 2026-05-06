@@ -116,3 +116,46 @@ void rinha_topk_exact_i16(
         rinha_insert_neighbor(candidate, k, out_neighbors);
     }
 }
+
+void rinha_topk_exact_i16_indexed(
+    const int16_t *query,
+    const int16_t *vectors,
+    const uint32_t *record_indices,
+    size_t candidate_count,
+    size_t dim,
+    size_t stride,
+    size_t k,
+    rinha_neighbor_t *out_neighbors
+) {
+    if (k == 0 || candidate_count == 0) {
+        return;
+    }
+
+    rinha_init_neighbors(k, out_neighbors);
+
+#if defined(__x86_64__) || defined(__i386__)
+    const int use_avx2 = (stride == 16 && dim <= 16 && rinha_supports_avx2());
+#endif
+
+    for (size_t i = 0; i < candidate_count; i++) {
+        const uint32_t record_index = record_indices[i];
+        const int16_t *record = vectors + ((size_t)record_index * stride);
+        int64_t distance_squared;
+
+#if defined(__x86_64__) || defined(__i386__)
+        if (use_avx2) {
+            distance_squared = rinha_distance_squared_avx2_16(query, record);
+        } else {
+            distance_squared = rinha_distance_squared_scalar(query, record, dim);
+        }
+#else
+        distance_squared = rinha_distance_squared_scalar(query, record, dim);
+#endif
+
+        rinha_neighbor_t candidate = {
+            .record_index = (int32_t)record_index,
+            .distance_squared = distance_squared,
+        };
+        rinha_insert_neighbor(candidate, k, out_neighbors);
+    }
+}

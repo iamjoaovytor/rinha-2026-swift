@@ -46,15 +46,102 @@ public enum KNN {
     public static func fraudVoteCount(
         query: [Int16],
         in index: ReferencesIndex,
+        ivf: IVFIndex? = nil,
+        config: SearchConfig = SearchConfig(),
         k: Int = 5
     ) -> Int {
-        withTopKRaw(query: query, in: index, k: k) { rawNeighbors in
+        if let ivf {
+            return fraudVoteCountIVF(
+                query: query,
+                in: index,
+                ivf: ivf,
+                config: config,
+                k: k
+            )
+        }
+        return withTopKRaw(query: query, in: index, k: k) { rawNeighbors in
             let labels = index.labels
             var fraudVotes = 0
             for neighbor in rawNeighbors where labels[Int(neighbor.record_index)] == 1 {
                 fraudVotes += 1
             }
             return fraudVotes
+        }
+    }
+
+    private static func fraudVoteCountIVF(
+        query: [Int16],
+        in index: ReferencesIndex,
+        ivf: IVFIndex,
+        config: SearchConfig,
+        k: Int
+    ) -> Int {
+        let clusterCount = ivf.header.clusterCount
+        let nprobe = min(max(1, config.nprobe), clusterCount)
+        precondition(k > 0, "k must be positive")
+
+        let centroidNeighbors = query.withUnsafeBufferPointer { queryBuffer in
+            withUnsafeTemporaryAllocation(of: rinha_neighbor_t.self, capacity: nprobe) { rawNeighbors in
+                rinha_topk_exact_i16(
+                    queryBuffer.baseAddress,
+                    ivf.centroids.baseAddress,
+                    numericCast(clusterCount),
+                    numericCast(index.header.dim),
+                    numericCast(ivf.header.stride),
+                    numericCast(nprobe),
+                    rawNeighbors.baseAddress
+                )
+                return Array(UnsafeBufferPointer(start: rawNeighbors.baseAddress, count: nprobe))
+            }
+        }
+
+        let offsets = ivf.clusterOffsets
+        var candidateCount = 0
+        for centroid in centroidNeighbors {
+            let cluster = Int(centroid.record_index)
+            let start = Int(offsets[cluster])
+            let end = Int(offsets[cluster + 1])
+            candidateCount += end - start
+        }
+
+        if candidateCount < k {
+            return fraudVoteCount(query: query, in: index, ivf: nil, config: config, k: k)
+        }
+
+        return withUnsafeTemporaryAllocation(of: UInt32.self, capacity: candidateCount) { candidates in
+            var writeIndex = 0
+            let postings = ivf.postings
+            for centroid in centroidNeighbors {
+                let cluster = Int(centroid.record_index)
+                let start = Int(offsets[cluster])
+                let end = Int(offsets[cluster + 1])
+                for postingIndex in start..<end {
+                    candidates[writeIndex] = postings[postingIndex]
+                    writeIndex += 1
+                }
+            }
+
+            return withUnsafeTemporaryAllocation(of: rinha_neighbor_t.self, capacity: k) { rawNeighbors in
+                query.withUnsafeBufferPointer { queryBuffer in
+                    rinha_topk_exact_i16_indexed(
+                        queryBuffer.baseAddress,
+                        index.vectors.baseAddress,
+                        candidates.baseAddress,
+                        numericCast(candidateCount),
+                        numericCast(index.header.dim),
+                        numericCast(index.header.stride),
+                        numericCast(k),
+                        rawNeighbors.baseAddress
+                    )
+                    let labels = index.labels
+                    var fraudVotes = 0
+                    for neighbor in UnsafeBufferPointer(start: rawNeighbors.baseAddress, count: k)
+                    where labels[Int(neighbor.record_index)] == 1 {
+                        fraudVotes += 1
+                    }
+                    return fraudVotes
+                }
+            }
         }
     }
 

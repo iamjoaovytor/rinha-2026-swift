@@ -26,6 +26,9 @@ enum Preprocess {
     static let layoutAoS: UInt32 = 0
     static let headerBytes = 128
     static let pageAlignment = 4096
+    static let defaultIVFClusters = 256
+    static let sampleMultiplier = 64
+    static let refinementIterations = 2
 }
 
 func die(_ message: String, code: Int32 = 1) -> Never {
@@ -74,12 +77,159 @@ func decodeNumber(_ value: Any) -> Double? {
     return nil
 }
 
+func ivfPath(for outputPath: String) -> String {
+    let url = URL(fileURLWithPath: outputPath)
+    return url.deletingPathExtension().appendingPathExtension("ivf").path
+}
+
+func buildIVF(
+    lanes: [Int16],
+    count: Int,
+    dim: Int,
+    stride: Int,
+    clusterCount requestedClusterCount: Int
+) -> (clusterCount: Int, centroids: [Int16], offsets: [UInt32], postings: [UInt32]) {
+    let clusterCount = max(1, min(requestedClusterCount, count))
+    var centroids = [Int16](repeating: 0, count: clusterCount * stride)
+
+    for cluster in 0..<clusterCount {
+        let recordIndex = cluster * count / clusterCount
+        let sourceBase = recordIndex * stride
+        let targetBase = cluster * stride
+        for lane in 0..<dim {
+            centroids[targetBase + lane] = lanes[sourceBase + lane]
+        }
+    }
+
+    let sampleCount = min(count, max(clusterCount * Preprocess.sampleMultiplier, clusterCount))
+    let sampleStep = max(1, count / sampleCount)
+
+    @inline(__always)
+    func nearestCluster(for recordIndex: Int, centroids: [Int16]) -> Int {
+        let recordBase = recordIndex * stride
+        var bestCluster = 0
+        var bestDistance = Int64.max
+        for cluster in 0..<clusterCount {
+            let centroidBase = cluster * stride
+            var sum: Int64 = 0
+            for lane in 0..<dim {
+                let diff = Int32(lanes[recordBase + lane]) - Int32(centroids[centroidBase + lane])
+                sum &+= Int64(diff &* diff)
+            }
+            if sum < bestDistance {
+                bestDistance = sum
+                bestCluster = cluster
+            }
+        }
+        return bestCluster
+    }
+
+    for _ in 0..<Preprocess.refinementIterations {
+        var sums = [Int64](repeating: 0, count: clusterCount * dim)
+        var counts = [Int](repeating: 0, count: clusterCount)
+        var sampleIndex = 0
+        while sampleIndex < count {
+            let cluster = nearestCluster(for: sampleIndex, centroids: centroids)
+            counts[cluster] += 1
+            let recordBase = sampleIndex * stride
+            let sumBase = cluster * dim
+            for lane in 0..<dim {
+                sums[sumBase + lane] += Int64(lanes[recordBase + lane])
+            }
+            sampleIndex += sampleStep
+        }
+
+        for cluster in 0..<clusterCount where counts[cluster] > 0 {
+            let centroidBase = cluster * stride
+            let sumBase = cluster * dim
+            let divisor = Int64(counts[cluster])
+            for lane in 0..<dim {
+                centroids[centroidBase + lane] = Int16(sums[sumBase + lane] / divisor)
+            }
+            for lane in dim..<stride {
+                centroids[centroidBase + lane] = 0
+            }
+        }
+    }
+
+    var assignments = [UInt16](repeating: 0, count: count)
+    var clusterSizes = [Int](repeating: 0, count: clusterCount)
+    for recordIndex in 0..<count {
+        let cluster = nearestCluster(for: recordIndex, centroids: centroids)
+        assignments[recordIndex] = UInt16(cluster)
+        clusterSizes[cluster] += 1
+    }
+
+    var offsets = [UInt32](repeating: 0, count: clusterCount + 1)
+    for cluster in 0..<clusterCount {
+        offsets[cluster + 1] = offsets[cluster] + UInt32(clusterSizes[cluster])
+    }
+
+    var cursors = offsets
+    var postings = [UInt32](repeating: 0, count: count)
+    for recordIndex in 0..<count {
+        let cluster = Int(assignments[recordIndex])
+        let position = Int(cursors[cluster])
+        postings[position] = UInt32(recordIndex)
+        cursors[cluster] += 1
+    }
+
+    return (clusterCount, centroids, offsets, postings)
+}
+
+func writeIVF(
+    path: String,
+    count: Int,
+    stride: Int,
+    clusterCount: Int,
+    centroids: [Int16],
+    offsets: [UInt32],
+    postings: [UInt32],
+    createdUnix: Int64
+) throws {
+    var output = Data()
+    output.append(contentsOf: [0x52, 0x49, 0x56, 0x46]) // "RIVF"
+    output.appendLE(UInt32(1))
+    output.appendLE(UInt64(count))
+    output.appendLE(UInt32(clusterCount))
+    output.appendLE(UInt32(stride))
+    output.appendLE(createdUnix)
+    output.padTo(alignment: IVFHeader.bytes)
+
+    centroids.withUnsafeBufferPointer { buffer in
+        let byteCount = centroids.count * MemoryLayout<Int16>.size
+        buffer.baseAddress!.withMemoryRebound(to: UInt8.self, capacity: byteCount) { ptr in
+            output.append(ptr, count: byteCount)
+        }
+    }
+    output.padTo(alignment: IVFHeader.pageAlignment)
+
+    offsets.withUnsafeBufferPointer { buffer in
+        let byteCount = offsets.count * MemoryLayout<UInt32>.size
+        buffer.baseAddress!.withMemoryRebound(to: UInt8.self, capacity: byteCount) { ptr in
+            output.append(ptr, count: byteCount)
+        }
+    }
+    output.padTo(alignment: IVFHeader.pageAlignment)
+
+    postings.withUnsafeBufferPointer { buffer in
+        let byteCount = postings.count * MemoryLayout<UInt32>.size
+        buffer.baseAddress!.withMemoryRebound(to: UInt8.self, capacity: byteCount) { ptr in
+            output.append(ptr, count: byteCount)
+        }
+    }
+
+    try output.write(to: URL(fileURLWithPath: path))
+}
+
 let arguments = CommandLine.arguments
 guard arguments.count >= 3 else {
     die("usage: preprocess <input.json[.gz]> <output.bin>", code: 2)
 }
 let inputPath = arguments[1]
 let outputPath = arguments[2]
+let env = ProcessInfo.processInfo.environment
+let ivfClusterCount = env["IVF_CLUSTERS"].flatMap(Int.init) ?? Preprocess.defaultIVFClusters
 
 let started = Date()
 FileHandle.standardError.write(Data("preprocess: reading \(inputPath)\n".utf8))
@@ -182,6 +332,31 @@ lanes.withUnsafeBufferPointer { buffer in
 }
 
 try output.write(to: URL(fileURLWithPath: outputPath))
+
+FileHandle.standardError.write(Data("preprocess: building ivf (\(ivfClusterCount) clusters)\n".utf8))
+let ivfStarted = Date()
+let ivf = buildIVF(
+    lanes: lanes,
+    count: count,
+    dim: Int(Preprocess.dim),
+    stride: Int(Preprocess.stride),
+    clusterCount: ivfClusterCount
+)
+let ivfOutputPath = ivfPath(for: outputPath)
+try writeIVF(
+    path: ivfOutputPath,
+    count: count,
+    stride: Int(Preprocess.stride),
+    clusterCount: ivf.clusterCount,
+    centroids: ivf.centroids,
+    offsets: ivf.offsets,
+    postings: ivf.postings,
+    createdUnix: Int64(started.timeIntervalSince1970)
+)
+let ivfElapsed = Date().timeIntervalSince(ivfStarted)
+FileHandle.standardError.write(Data(
+    "preprocess: wrote \(ivfOutputPath) (\(ivf.postings.count) postings, \(ivf.clusterCount) clusters) in \(String(format: "%.2f", ivfElapsed))s\n".utf8
+))
 
 let elapsed = Date().timeIntervalSince(started)
 FileHandle.standardError.write(Data(

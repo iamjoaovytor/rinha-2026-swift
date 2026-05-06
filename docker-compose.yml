@@ -6,7 +6,8 @@ services:
       context: .
       dockerfile: Dockerfile
       target: runtime-local
-    environment:
+    environment: &api_env
+      IVF_NPROBE: "${IVF_NPROBE:-4}"
       PORT: "3001"
     cpus: "0.40"
     mem_limit: "160MB"
@@ -19,6 +20,7 @@ services:
   api2:
     <<: *api
     environment:
+      <<: *api_env
       PORT: "3002"
 
   lb:
