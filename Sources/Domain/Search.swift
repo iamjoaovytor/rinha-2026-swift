@@ -81,6 +81,7 @@ public enum KNN {
             in: index,
             ivf: ivf,
             nprobe: config.initialNprobe,
+            useBoundingBoxes: config.useBoundingBoxes,
             k: k
         )
         guard config.shouldExpand(after: initialVotes) else {
@@ -91,6 +92,7 @@ public enum KNN {
             in: index,
             ivf: ivf,
             nprobe: config.nprobe,
+            useBoundingBoxes: config.useBoundingBoxes,
             k: k
         )
     }
@@ -100,6 +102,7 @@ public enum KNN {
         in index: ReferencesIndex,
         ivf: IVFIndex,
         nprobe: Int,
+        useBoundingBoxes: Bool,
         k: Int
     ) -> Int {
         let clusterCount = ivf.header.clusterCount
@@ -119,6 +122,35 @@ public enum KNN {
                 )
                 return Array(UnsafeBufferPointer(start: rawNeighbors.baseAddress, count: nprobe))
             }
+        }
+
+        if let orderedVectors = ivf.orderedVectors,
+           let orderedLabels = ivf.orderedLabels {
+            return fraudVoteCountIVFContiguous(
+                query: query,
+                in: index,
+                ivf: ivf,
+                centroidNeighbors: centroidNeighbors,
+                orderedVectors: orderedVectors,
+                orderedLabels: orderedLabels,
+                useBoundingBoxes: useBoundingBoxes,
+                k: k
+            )
+        }
+
+        if useBoundingBoxes,
+           ivf.header.hasBoundingBoxes,
+           let bboxMin = ivf.bboxMin,
+           let bboxMax = ivf.bboxMax {
+            return fraudVoteCountIVFPruned(
+                query: query,
+                in: index,
+                ivf: ivf,
+                centroidNeighbors: centroidNeighbors,
+                bboxMin: bboxMin,
+                bboxMax: bboxMax,
+                k: k
+            )
         }
 
         let offsets = ivf.clusterOffsets
@@ -169,6 +201,197 @@ public enum KNN {
                 }
             }
         }
+    }
+
+    private static func fraudVoteCountIVFContiguous(
+        query: [Int16],
+        in index: ReferencesIndex,
+        ivf: IVFIndex,
+        centroidNeighbors: [rinha_neighbor_t],
+        orderedVectors: UnsafeBufferPointer<Int16>,
+        orderedLabels: UnsafeBufferPointer<UInt8>,
+        useBoundingBoxes: Bool,
+        k: Int
+    ) -> Int {
+        let offsets = ivf.clusterOffsets
+        let bboxMin = useBoundingBoxes && ivf.header.hasBoundingBoxes ? ivf.bboxMin : nil
+        let bboxMax = useBoundingBoxes && ivf.header.hasBoundingBoxes ? ivf.bboxMax : nil
+        var top = [Neighbor]()
+        top.reserveCapacity(k)
+
+        for centroid in centroidNeighbors {
+            let cluster = Int(centroid.record_index)
+            if top.count == k, let bboxMin, let bboxMax {
+                let lowerBound = lowerBoundSquared(
+                    query: query,
+                    cluster: cluster,
+                    bboxMin: bboxMin,
+                    bboxMax: bboxMax,
+                    stride: ivf.header.stride,
+                    dim: index.header.dim
+                )
+                if lowerBound >= top[k - 1].distanceSquared {
+                    continue
+                }
+            }
+
+            let start = Int(offsets[cluster])
+            let end = Int(offsets[cluster + 1])
+            let candidateCount = end - start
+            if candidateCount <= 0 { continue }
+
+            let clusterNeighbors = withUnsafeTemporaryAllocation(of: rinha_neighbor_t.self, capacity: min(k, candidateCount)) { rawNeighbors in
+                query.withUnsafeBufferPointer { queryBuffer in
+                    let vectorsBase = orderedVectors.baseAddress!.advanced(by: start * ivf.header.stride)
+                    rinha_topk_exact_i16(
+                        queryBuffer.baseAddress,
+                        vectorsBase,
+                        numericCast(candidateCount),
+                        numericCast(index.header.dim),
+                        numericCast(ivf.header.stride),
+                        numericCast(min(k, candidateCount)),
+                        rawNeighbors.baseAddress
+                    )
+                    let rawCount = min(k, candidateCount)
+                    let rawBuffer = UnsafeBufferPointer(start: rawNeighbors.baseAddress, count: rawCount)
+                    var neighbors = [Neighbor]()
+                    neighbors.reserveCapacity(rawCount)
+                    for raw in rawBuffer where raw.record_index >= 0 {
+                        neighbors.append(
+                            Neighbor(
+                                recordIndex: start + Int(raw.record_index),
+                                distanceSquared: raw.distance_squared
+                            )
+                        )
+                    }
+                    return neighbors
+                }
+            }
+
+            for neighbor in clusterNeighbors {
+                insertSwift(neighbor, into: &top, capacity: k)
+            }
+        }
+
+        if top.count < k {
+            return fraudVoteCount(query: query, in: index, k: k)
+        }
+        var fraudVotes = 0
+        for neighbor in top where orderedLabels[neighbor.recordIndex] == 1 {
+            fraudVotes += 1
+        }
+        return fraudVotes
+    }
+
+    private static func fraudVoteCountIVFPruned(
+        query: [Int16],
+        in index: ReferencesIndex,
+        ivf: IVFIndex,
+        centroidNeighbors: [rinha_neighbor_t],
+        bboxMin: UnsafeBufferPointer<Int16>,
+        bboxMax: UnsafeBufferPointer<Int16>,
+        k: Int
+    ) -> Int {
+        let offsets = ivf.clusterOffsets
+        let postings = ivf.postings
+        let dim = index.header.dim
+        var top = [Neighbor]()
+        top.reserveCapacity(k)
+
+        for centroid in centroidNeighbors {
+            let cluster = Int(centroid.record_index)
+            if top.count == k {
+                let lowerBound = lowerBoundSquared(
+                    query: query,
+                    cluster: cluster,
+                    bboxMin: bboxMin,
+                    bboxMax: bboxMax,
+                    stride: ivf.header.stride,
+                    dim: dim
+                )
+                if lowerBound >= top[k - 1].distanceSquared {
+                    continue
+                }
+            }
+
+            let start = Int(offsets[cluster])
+            let end = Int(offsets[cluster + 1])
+            let candidateCount = end - start
+            if candidateCount <= 0 {
+                continue
+            }
+
+            let clusterNeighbors = withUnsafeTemporaryAllocation(of: rinha_neighbor_t.self, capacity: k) { rawNeighbors in
+                query.withUnsafeBufferPointer { queryBuffer in
+                    postings.baseAddress!.advanced(by: start).withMemoryRebound(to: UInt32.self, capacity: candidateCount) { candidates in
+                        rinha_topk_exact_i16_indexed(
+                            queryBuffer.baseAddress,
+                            index.vectors.baseAddress,
+                            candidates,
+                            numericCast(candidateCount),
+                            numericCast(index.header.dim),
+                            numericCast(index.header.stride),
+                            numericCast(k),
+                            rawNeighbors.baseAddress
+                        )
+                    }
+                    let rawCount = min(k, candidateCount)
+                    let rawBuffer = UnsafeBufferPointer(start: rawNeighbors.baseAddress, count: rawCount)
+                    var neighbors = [Neighbor]()
+                    neighbors.reserveCapacity(rawCount)
+                    for raw in rawBuffer where raw.record_index >= 0 {
+                        neighbors.append(
+                            Neighbor(
+                                recordIndex: Int(raw.record_index),
+                                distanceSquared: raw.distance_squared
+                            )
+                        )
+                    }
+                    return neighbors
+                }
+            }
+
+            for neighbor in clusterNeighbors {
+                insertSwift(neighbor, into: &top, capacity: k)
+            }
+        }
+
+        if top.count < k {
+            return fraudVoteCount(query: query, in: index, k: k)
+        }
+        let labels = index.labels
+        var fraudVotes = 0
+        for neighbor in top where labels[neighbor.recordIndex] == 1 {
+            fraudVotes += 1
+        }
+        return fraudVotes
+    }
+
+    private static func lowerBoundSquared(
+        query: [Int16],
+        cluster: Int,
+        bboxMin: UnsafeBufferPointer<Int16>,
+        bboxMax: UnsafeBufferPointer<Int16>,
+        stride: Int,
+        dim: Int
+    ) -> Int64 {
+        let base = cluster * stride
+        var sum: Int64 = 0
+        for lane in 0..<dim {
+            let q = Int32(query[lane])
+            let minValue = Int32(bboxMin[base + lane])
+            let maxValue = Int32(bboxMax[base + lane])
+            let diff: Int32
+            if q < minValue {
+                diff = minValue - q
+            } else if q > maxValue {
+                diff = q - maxValue
+            } else {
+                diff = 0
+            }
+            sum &+= Int64(diff &* diff)
+        }
+        return sum
     }
 
     private static func withTopKRaw<T>(

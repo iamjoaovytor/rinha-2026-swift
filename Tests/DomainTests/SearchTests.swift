@@ -120,23 +120,43 @@ struct SearchTests {
             1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
             51, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         ]
+        let bboxMin: [Int16] = [
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            50, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ]
+        let bboxMax: [Int16] = [
+            2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            52, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ]
         let offsets: [UInt32] = [0, 2, 4]
         let postings: [UInt32] = [0, 1, 2, 3]
+        let orderedVectors = records.flatMap(\.vector)
+        let orderedLabels = records.map(\.label)
         try writeIVF(
             path: ivfURL,
             count: records.count,
             clusterCount: 2,
             centroids: centroids,
+            bboxMin: bboxMin,
+            bboxMax: bboxMax,
             offsets: offsets,
-            postings: postings
+            postings: postings,
+            orderedVectors: orderedVectors,
+            orderedLabels: orderedLabels
         )
 
         let index = try ReferencesIndex.load(path: referencesURL.path)
         let ivf = try IVFIndex.load(path: ivfURL.path)
 
         #expect(ivf.header.clusterCount == 2)
+        #expect(ivf.header.hasBoundingBoxes)
+        #expect(ivf.header.hasClusterVectors)
+        #expect(Array(ivf.bboxMin!) == bboxMin)
+        #expect(Array(ivf.bboxMax!) == bboxMax)
         #expect(Array(ivf.clusterOffsets) == offsets)
         #expect(Array(ivf.postings) == postings)
+        #expect(Array(ivf.orderedVectors!) == orderedVectors)
+        #expect(Array(ivf.orderedLabels!) == orderedLabels)
 
         let query: [Int16] = [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
         let exactFraudVotes = KNN.fraudVoteCount(query: query, in: index, k: 3)
@@ -179,15 +199,26 @@ struct SearchTests {
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
             1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         ]
+        let bboxMin = centroids
+        let bboxMax: [Int16] = [
+            50, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ]
         let offsets: [UInt32] = [0, 5, 10]
         let postings: [UInt32] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+        let orderedVectors = records.flatMap(\.vector)
+        let orderedLabels = records.map(\.label)
         try writeIVF(
             path: ivfURL,
             count: records.count,
             clusterCount: 2,
             centroids: centroids,
+            bboxMin: bboxMin,
+            bboxMax: bboxMax,
             offsets: offsets,
-            postings: postings
+            postings: postings,
+            orderedVectors: orderedVectors,
+            orderedLabels: orderedLabels
         )
 
         let index = try ReferencesIndex.load(path: referencesURL.path)
@@ -255,12 +286,17 @@ struct SearchTests {
         count: Int,
         clusterCount: Int,
         centroids: [Int16],
+        bboxMin: [Int16]? = nil,
+        bboxMax: [Int16]? = nil,
         offsets: [UInt32],
-        postings: [UInt32]
+        postings: [UInt32],
+        orderedVectors: [Int16]? = nil,
+        orderedLabels: [UInt8]? = nil,
+        version: UInt32 = 3
     ) throws {
         var data = Data()
         data.append(contentsOf: [0x52, 0x49, 0x56, 0x46])
-        appendLE(UInt32(1), to: &data)
+        appendLE(version, to: &data)
         appendLE(UInt64(count), to: &data)
         appendLE(UInt32(clusterCount), to: &data)
         appendLE(UInt32(16), to: &data)
@@ -272,10 +308,25 @@ struct SearchTests {
         for lane in centroids { appendLE(lane, to: &data) }
         padTo(alignment: 4096, in: &data)
 
+        if version >= 2 {
+            let bboxMin = bboxMin ?? centroids
+            let bboxMax = bboxMax ?? centroids
+            for lane in bboxMin { appendLE(lane, to: &data) }
+            padTo(alignment: 4096, in: &data)
+            for lane in bboxMax { appendLE(lane, to: &data) }
+            padTo(alignment: 4096, in: &data)
+        }
+
         for offset in offsets { appendLE(offset, to: &data) }
         padTo(alignment: 4096, in: &data)
 
         for posting in postings { appendLE(posting, to: &data) }
+        if version >= 3 {
+            padTo(alignment: 4096, in: &data)
+            for lane in (orderedVectors ?? []) { appendLE(lane, to: &data) }
+            padTo(alignment: 4096, in: &data)
+            data.append(contentsOf: orderedLabels ?? [])
+        }
         try data.write(to: path)
     }
 

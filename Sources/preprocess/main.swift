@@ -27,8 +27,46 @@ enum Preprocess {
     static let headerBytes = 128
     static let pageAlignment = 4096
     static let defaultIVFClusters = 256
-    static let sampleMultiplier = 64
-    static let refinementIterations = 2
+    static let defaultIVFTrainSample = 262_144
+    static let defaultIVFTrainIterations = 12
+    static let defaultIVFFullRefineIterations = 1
+    static let defaultIVFRestarts = 2
+    static let defaultIVFSeed: UInt64 = 42
+}
+
+struct IVFTrainingConfig {
+    let sampleCount: Int
+    let trainIterations: Int
+    let fullRefineIterations: Int
+    let restarts: Int
+    let seed: UInt64
+    let useKMeansPP: Bool
+}
+
+struct SplitMix64 {
+    private var state: UInt64
+
+    init(seed: UInt64) {
+        self.state = seed
+    }
+
+    mutating func next() -> UInt64 {
+        state &+= 0x9E3779B97F4A7C15
+        var z = state
+        z = (z ^ (z >> 30)) &* 0xBF58476D1CE4E5B9
+        z = (z ^ (z >> 27)) &* 0x94D049BB133111EB
+        return z ^ (z >> 31)
+    }
+
+    mutating func nextInt(upperBound: Int) -> Int {
+        precondition(upperBound > 0)
+        return Int(next() % UInt64(upperBound))
+    }
+
+    mutating func nextInt64(upperBound: Int64) -> Int64 {
+        precondition(upperBound > 0)
+        return Int64(next() % UInt64(upperBound))
+    }
 }
 
 func die(_ message: String, code: Int32 = 1) -> Never {
@@ -84,28 +122,33 @@ func ivfPath(for outputPath: String) -> String {
 
 func buildIVF(
     lanes: [Int16],
+    labels: [UInt8],
     count: Int,
     dim: Int,
     stride: Int,
-    clusterCount requestedClusterCount: Int
-) -> (clusterCount: Int, centroids: [Int16], offsets: [UInt32], postings: [UInt32]) {
+    clusterCount requestedClusterCount: Int,
+    training: IVFTrainingConfig
+) -> (clusterCount: Int, centroids: [Int16], bboxMin: [Int16], bboxMax: [Int16], offsets: [UInt32], postings: [UInt32], orderedVectors: [Int16], orderedLabels: [UInt8]) {
     let clusterCount = max(1, min(requestedClusterCount, count))
-    var centroids = [Int16](repeating: 0, count: clusterCount * stride)
+    let sampleCount = min(count, max(clusterCount, training.sampleCount))
 
-    for cluster in 0..<clusterCount {
-        let recordIndex = cluster * count / clusterCount
-        let sourceBase = recordIndex * stride
-        let targetBase = cluster * stride
-        for lane in 0..<dim {
-            centroids[targetBase + lane] = lanes[sourceBase + lane]
+    func sampleIndices() -> [Int] {
+        if sampleCount >= count {
+            return Array(0..<count)
         }
+        var indices = [Int]()
+        indices.reserveCapacity(sampleCount)
+        let step = Double(count) / Double(sampleCount)
+        for i in 0..<sampleCount {
+            indices.append(min(count - 1, Int(Double(i) * step)))
+        }
+        return indices
     }
 
-    let sampleCount = min(count, max(clusterCount * Preprocess.sampleMultiplier, clusterCount))
-    let sampleStep = max(1, count / sampleCount)
+    let sampledRecordIndices = sampleIndices()
 
     @inline(__always)
-    func nearestCluster(for recordIndex: Int, centroids: [Int16]) -> Int {
+    func nearestCluster(for recordIndex: Int, centroids: [Int16]) -> (cluster: Int, distance: Int64) {
         let recordBase = recordIndex * stride
         var bestCluster = 0
         var bestDistance = Int64.max
@@ -121,41 +164,153 @@ func buildIVF(
                 bestCluster = cluster
             }
         }
-        return bestCluster
+        return (bestCluster, bestDistance)
     }
 
-    for _ in 0..<Preprocess.refinementIterations {
-        var sums = [Int64](repeating: 0, count: clusterCount * dim)
-        var counts = [Int](repeating: 0, count: clusterCount)
-        var sampleIndex = 0
-        while sampleIndex < count {
-            let cluster = nearestCluster(for: sampleIndex, centroids: centroids)
-            counts[cluster] += 1
-            let recordBase = sampleIndex * stride
-            let sumBase = cluster * dim
-            for lane in 0..<dim {
-                sums[sumBase + lane] += Int64(lanes[recordBase + lane])
+    func initializeCentroids(seed: UInt64) -> [Int16] {
+        var centroids = [Int16](repeating: 0, count: clusterCount * stride)
+        if !training.useKMeansPP {
+            for cluster in 0..<clusterCount {
+                let recordIndex = sampledRecordIndices[cluster * sampledRecordIndices.count / clusterCount]
+                let sourceBase = recordIndex * stride
+                let targetBase = cluster * stride
+                for lane in 0..<dim {
+                    centroids[targetBase + lane] = lanes[sourceBase + lane]
+                }
             }
-            sampleIndex += sampleStep
+            return centroids
         }
 
-        for cluster in 0..<clusterCount where counts[cluster] > 0 {
-            let centroidBase = cluster * stride
-            let sumBase = cluster * dim
-            let divisor = Int64(counts[cluster])
+        var rng = SplitMix64(seed: seed)
+        let firstSample = sampledRecordIndices[rng.nextInt(upperBound: sampledRecordIndices.count)]
+        for lane in 0..<dim {
+            centroids[lane] = lanes[firstSample * stride + lane]
+        }
+
+        var minDistances = [Int64](repeating: Int64.max, count: sampledRecordIndices.count)
+        for cluster in 1..<clusterCount {
+            var total: Int64 = 0
+            let previousCentroidBase = (cluster - 1) * stride
+            for (sampleOffset, recordIndex) in sampledRecordIndices.enumerated() {
+                let recordBase = recordIndex * stride
+                var sum: Int64 = 0
+                for lane in 0..<dim {
+                    let diff = Int32(lanes[recordBase + lane]) - Int32(centroids[previousCentroidBase + lane])
+                    sum &+= Int64(diff &* diff)
+                }
+                if sum < minDistances[sampleOffset] {
+                    minDistances[sampleOffset] = sum
+                }
+                total &+= max(1, minDistances[sampleOffset])
+            }
+
+            let chosenRecordIndex: Int
+            if total <= 0 {
+                chosenRecordIndex = sampledRecordIndices[rng.nextInt(upperBound: sampledRecordIndices.count)]
+            } else {
+                let target = rng.nextInt64(upperBound: total)
+                var cumulative: Int64 = 0
+                var chosenSampleOffset = sampledRecordIndices.count - 1
+                for (sampleOffset, distance) in minDistances.enumerated() {
+                    cumulative &+= max(1, distance)
+                    if cumulative > target {
+                        chosenSampleOffset = sampleOffset
+                        break
+                    }
+                }
+                chosenRecordIndex = sampledRecordIndices[chosenSampleOffset]
+            }
+
+            let targetBase = cluster * stride
+            let sourceBase = chosenRecordIndex * stride
             for lane in 0..<dim {
-                centroids[centroidBase + lane] = Int16(sums[sumBase + lane] / divisor)
+                centroids[targetBase + lane] = lanes[sourceBase + lane]
             }
-            for lane in dim..<stride {
-                centroids[centroidBase + lane] = 0
+        }
+
+        return centroids
+    }
+
+    func refine(
+        centroids initialCentroids: [Int16],
+        recordIndices: [Int],
+        iterations: Int
+    ) -> ([Int16], Int64) {
+        var centroids = initialCentroids
+        var inertia: Int64 = .max
+        guard !recordIndices.isEmpty else { return (centroids, inertia) }
+
+        for _ in 0..<iterations {
+            var sums = [Int64](repeating: 0, count: clusterCount * dim)
+            var counts = [Int](repeating: 0, count: clusterCount)
+            inertia = 0
+
+            for recordIndex in recordIndices {
+                let nearest = nearestCluster(for: recordIndex, centroids: centroids)
+                let cluster = nearest.cluster
+                counts[cluster] += 1
+                inertia &+= nearest.distance
+                let recordBase = recordIndex * stride
+                let sumBase = cluster * dim
+                for lane in 0..<dim {
+                    sums[sumBase + lane] += Int64(lanes[recordBase + lane])
+                }
             }
+
+            for cluster in 0..<clusterCount {
+                guard counts[cluster] > 0 else { continue }
+                let centroidBase = cluster * stride
+                let sumBase = cluster * dim
+                let divisor = Int64(counts[cluster])
+                for lane in 0..<dim {
+                    centroids[centroidBase + lane] = Int16(sums[sumBase + lane] / divisor)
+                }
+                for lane in dim..<stride {
+                    centroids[centroidBase + lane] = 0
+                }
+            }
+        }
+
+        return (centroids, inertia)
+    }
+
+    var bestCentroids = initializeCentroids(seed: training.seed)
+    var bestInertia: Int64 = .max
+
+    for restart in 0..<max(1, training.restarts) {
+        let seed = training.seed &+ UInt64(restart) &* 0x9E3779B97F4A7C15
+        let initialCentroids = initializeCentroids(seed: seed)
+        let refined = refine(
+            centroids: initialCentroids,
+            recordIndices: sampledRecordIndices,
+            iterations: max(1, training.trainIterations)
+        )
+        if refined.1 < bestInertia {
+            bestCentroids = refined.0
+            bestInertia = refined.1
+        }
+    }
+
+    var centroids = bestCentroids
+    if training.fullRefineIterations > 0 {
+        let fullIndices = Array(0..<count)
+        centroids = refine(
+            centroids: centroids,
+            recordIndices: fullIndices,
+            iterations: training.fullRefineIterations
+        ).0
+    }
+
+    for lane in dim..<stride {
+        for cluster in 0..<clusterCount {
+            centroids[cluster * stride + lane] = 0
         }
     }
 
     var assignments = [UInt16](repeating: 0, count: count)
     var clusterSizes = [Int](repeating: 0, count: clusterCount)
     for recordIndex in 0..<count {
-        let cluster = nearestCluster(for: recordIndex, centroids: centroids)
+        let cluster = nearestCluster(for: recordIndex, centroids: centroids).cluster
         assignments[recordIndex] = UInt16(cluster)
         clusterSizes[cluster] += 1
     }
@@ -174,7 +329,53 @@ func buildIVF(
         cursors[cluster] += 1
     }
 
-    return (clusterCount, centroids, offsets, postings)
+    var orderedVectors = [Int16](repeating: 0, count: count * stride)
+    var orderedLabels = [UInt8](repeating: 0, count: count)
+    for orderedIndex in 0..<count {
+        let recordIndex = Int(postings[orderedIndex])
+        let sourceBase = recordIndex * stride
+        let targetBase = orderedIndex * stride
+        for lane in 0..<stride {
+            orderedVectors[targetBase + lane] = lanes[sourceBase + lane]
+        }
+        orderedLabels[orderedIndex] = labels[recordIndex]
+    }
+
+    var bboxMin = [Int16](repeating: .max, count: clusterCount * stride)
+    var bboxMax = [Int16](repeating: .min, count: clusterCount * stride)
+    for cluster in 0..<clusterCount {
+        let base = cluster * stride
+        for lane in dim..<stride {
+            bboxMin[base + lane] = 0
+            bboxMax[base + lane] = 0
+        }
+    }
+    for recordIndex in 0..<count {
+        let cluster = Int(assignments[recordIndex])
+        let clusterBase = cluster * stride
+        let recordBase = recordIndex * stride
+        for lane in 0..<dim {
+            let value = lanes[recordBase + lane]
+            if value < bboxMin[clusterBase + lane] {
+                bboxMin[clusterBase + lane] = value
+            }
+            if value > bboxMax[clusterBase + lane] {
+                bboxMax[clusterBase + lane] = value
+            }
+        }
+    }
+    for cluster in 0..<clusterCount {
+        let base = cluster * stride
+        if bboxMin[base] == .max {
+            for lane in 0..<dim {
+                let centroidValue = centroids[base + lane]
+                bboxMin[base + lane] = centroidValue
+                bboxMax[base + lane] = centroidValue
+            }
+        }
+    }
+
+    return (clusterCount, centroids, bboxMin, bboxMax, offsets, postings, orderedVectors, orderedLabels)
 }
 
 func writeIVF(
@@ -183,13 +384,17 @@ func writeIVF(
     stride: Int,
     clusterCount: Int,
     centroids: [Int16],
+    bboxMin: [Int16],
+    bboxMax: [Int16],
     offsets: [UInt32],
     postings: [UInt32],
+    orderedVectors: [Int16],
+    orderedLabels: [UInt8],
     createdUnix: Int64
 ) throws {
     var output = Data()
     output.append(contentsOf: [0x52, 0x49, 0x56, 0x46]) // "RIVF"
-    output.appendLE(UInt32(1))
+    output.appendLE(UInt32(3))
     output.appendLE(UInt64(count))
     output.appendLE(UInt32(clusterCount))
     output.appendLE(UInt32(stride))
@@ -198,6 +403,22 @@ func writeIVF(
 
     centroids.withUnsafeBufferPointer { buffer in
         let byteCount = centroids.count * MemoryLayout<Int16>.size
+        buffer.baseAddress!.withMemoryRebound(to: UInt8.self, capacity: byteCount) { ptr in
+            output.append(ptr, count: byteCount)
+        }
+    }
+    output.padTo(alignment: IVFHeader.pageAlignment)
+
+    bboxMin.withUnsafeBufferPointer { buffer in
+        let byteCount = bboxMin.count * MemoryLayout<Int16>.size
+        buffer.baseAddress!.withMemoryRebound(to: UInt8.self, capacity: byteCount) { ptr in
+            output.append(ptr, count: byteCount)
+        }
+    }
+    output.padTo(alignment: IVFHeader.pageAlignment)
+
+    bboxMax.withUnsafeBufferPointer { buffer in
+        let byteCount = bboxMax.count * MemoryLayout<Int16>.size
         buffer.baseAddress!.withMemoryRebound(to: UInt8.self, capacity: byteCount) { ptr in
             output.append(ptr, count: byteCount)
         }
@@ -218,6 +439,19 @@ func writeIVF(
             output.append(ptr, count: byteCount)
         }
     }
+    output.padTo(alignment: IVFHeader.pageAlignment)
+
+    orderedVectors.withUnsafeBufferPointer { buffer in
+        let byteCount = orderedVectors.count * MemoryLayout<Int16>.size
+        buffer.baseAddress!.withMemoryRebound(to: UInt8.self, capacity: byteCount) { ptr in
+            output.append(ptr, count: byteCount)
+        }
+    }
+    output.padTo(alignment: IVFHeader.pageAlignment)
+
+    orderedLabels.withUnsafeBufferPointer { buffer in
+        output.append(buffer.baseAddress!, count: orderedLabels.count)
+    }
 
     try output.write(to: URL(fileURLWithPath: path))
 }
@@ -230,6 +464,14 @@ let inputPath = arguments[1]
 let outputPath = arguments[2]
 let env = ProcessInfo.processInfo.environment
 let ivfClusterCount = env["IVF_CLUSTERS"].flatMap(Int.init) ?? Preprocess.defaultIVFClusters
+let ivfTrainingConfig = IVFTrainingConfig(
+    sampleCount: env["IVF_TRAIN_SAMPLE"].flatMap(Int.init) ?? Preprocess.defaultIVFTrainSample,
+    trainIterations: env["IVF_TRAIN_ITERS"].flatMap(Int.init) ?? Preprocess.defaultIVFTrainIterations,
+    fullRefineIterations: env["IVF_FULL_REFINE_ITERS"].flatMap(Int.init) ?? Preprocess.defaultIVFFullRefineIterations,
+    restarts: env["IVF_RESTARTS"].flatMap(Int.init) ?? Preprocess.defaultIVFRestarts,
+    seed: env["IVF_SEED"].flatMap(UInt64.init) ?? Preprocess.defaultIVFSeed,
+    useKMeansPP: env["IVF_KMEANSPP"].map { $0 != "0" } ?? true
+)
 
 let started = Date()
 FileHandle.standardError.write(Data("preprocess: reading \(inputPath)\n".utf8))
@@ -333,14 +575,18 @@ lanes.withUnsafeBufferPointer { buffer in
 
 try output.write(to: URL(fileURLWithPath: outputPath))
 
-FileHandle.standardError.write(Data("preprocess: building ivf (\(ivfClusterCount) clusters)\n".utf8))
+FileHandle.standardError.write(Data(
+    "preprocess: building ivf (\(ivfClusterCount) clusters, sample=\(ivfTrainingConfig.sampleCount), iters=\(ivfTrainingConfig.trainIterations), full_refine=\(ivfTrainingConfig.fullRefineIterations), restarts=\(ivfTrainingConfig.restarts), kmeanspp=\(ivfTrainingConfig.useKMeansPP ? 1 : 0))\n".utf8
+))
 let ivfStarted = Date()
 let ivf = buildIVF(
     lanes: lanes,
+    labels: labels,
     count: count,
     dim: Int(Preprocess.dim),
     stride: Int(Preprocess.stride),
-    clusterCount: ivfClusterCount
+    clusterCount: ivfClusterCount,
+    training: ivfTrainingConfig
 )
 let ivfOutputPath = ivfPath(for: outputPath)
 try writeIVF(
@@ -349,8 +595,12 @@ try writeIVF(
     stride: Int(Preprocess.stride),
     clusterCount: ivf.clusterCount,
     centroids: ivf.centroids,
+    bboxMin: ivf.bboxMin,
+    bboxMax: ivf.bboxMax,
     offsets: ivf.offsets,
     postings: ivf.postings,
+    orderedVectors: ivf.orderedVectors,
+    orderedLabels: ivf.orderedLabels,
     createdUnix: Int64(started.timeIntervalSince1970)
 )
 let ivfElapsed = Date().timeIntervalSince(ivfStarted)

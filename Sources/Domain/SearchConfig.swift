@@ -5,6 +5,7 @@ public struct SearchConfig: Sendable {
     public let initialNprobe: Int
     public let adaptiveMinFraudVotes: Int
     public let adaptiveMaxFraudVotes: Int
+    public let useBoundingBoxes: Bool
 
     public var adaptiveEnabled: Bool {
         initialNprobe < nprobe && adaptiveMinFraudVotes <= adaptiveMaxFraudVotes
@@ -14,7 +15,8 @@ public struct SearchConfig: Sendable {
         nprobe: Int = 4,
         initialNprobe: Int? = nil,
         adaptiveMinFraudVotes: Int = 2,
-        adaptiveMaxFraudVotes: Int = 3
+        adaptiveMaxFraudVotes: Int = 3,
+        useBoundingBoxes: Bool = false
     ) {
         let clampedNProbe = max(1, nprobe)
         let clampedInitial = min(max(1, initialNprobe ?? clampedNProbe), clampedNProbe)
@@ -22,6 +24,7 @@ public struct SearchConfig: Sendable {
         self.initialNprobe = clampedInitial
         self.adaptiveMinFraudVotes = adaptiveMinFraudVotes
         self.adaptiveMaxFraudVotes = adaptiveMaxFraudVotes
+        self.useBoundingBoxes = useBoundingBoxes
     }
 
     public func shouldExpand(after fraudVotes: Int) -> Bool {

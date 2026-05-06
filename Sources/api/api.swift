@@ -72,6 +72,7 @@ struct RinhaAPI {
         let initialNprobe = env["IVF_INITIAL_NPROBE"].flatMap(Int.init)
         let adaptiveMinFraudVotes = env["IVF_ADAPTIVE_MIN_VOTES"].flatMap(Int.init) ?? 2
         let adaptiveMaxFraudVotes = env["IVF_ADAPTIVE_MAX_VOTES"].flatMap(Int.init) ?? 3
+        let useBoundingBoxes = env["IVF_USE_BBOX"] == "1"
 
         Task.detached {
             do {
@@ -92,7 +93,8 @@ struct RinhaAPI {
                         nprobe: nprobe,
                         initialNprobe: initialNprobe,
                         adaptiveMinFraudVotes: adaptiveMinFraudVotes,
-                        adaptiveMaxFraudVotes: adaptiveMaxFraudVotes
+                        adaptiveMaxFraudVotes: adaptiveMaxFraudVotes,
+                        useBoundingBoxes: useBoundingBoxes
                     ),
                     vectorizer: Vectorizer(mccRisk: mccRisk)
                 )
@@ -103,8 +105,9 @@ struct RinhaAPI {
                 } else {
                     adaptiveDetails = ""
                 }
+                let bboxDetails = loaded.searchConfig.useBoundingBoxes ? ", bbox=on" : ", bbox=off"
                 FileHandle.standardError.write(Data(
-                    "loader: ready (count=\(index.header.count), scale=\(index.header.scale), ivf=\(ivf != nil ? "on" : "off"), nprobe=\(loaded.searchConfig.nprobe)\(adaptiveDetails))\n".utf8
+                    "loader: ready (count=\(index.header.count), scale=\(index.header.scale), ivf=\(ivf != nil ? "on" : "off"), nprobe=\(loaded.searchConfig.nprobe)\(adaptiveDetails)\(bboxDetails))\n".utf8
                 ))
             } catch {
                 let message = "\(error)"

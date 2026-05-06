@@ -11,6 +11,7 @@ services:
       IVF_INITIAL_NPROBE: "${IVF_INITIAL_NPROBE:-}"
       IVF_ADAPTIVE_MIN_VOTES: "${IVF_ADAPTIVE_MIN_VOTES:-2}"
       IVF_ADAPTIVE_MAX_VOTES: "${IVF_ADAPTIVE_MAX_VOTES:-3}"
+      IVF_USE_BBOX: "${IVF_USE_BBOX:-0}"
       PORT: "3001"
     cpus: "0.40"
     mem_limit: "160MB"

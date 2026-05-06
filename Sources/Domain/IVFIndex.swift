@@ -8,7 +8,9 @@ import Foundation
 
 public struct IVFHeader: Sendable {
     public static let magic: UInt32 = 0x46_56_49_52 // "RIVF" little-endian
-    public static let supportedVersion: UInt32 = 1
+    public static let supportedVersionV1: UInt32 = 1
+    public static let supportedVersionV2: UInt32 = 2
+    public static let supportedVersionV3: UInt32 = 3
     public static let bytes = 64
     public static let pageAlignment = 4096
 
@@ -17,6 +19,14 @@ public struct IVFHeader: Sendable {
     public let clusterCount: Int
     public let stride: Int
     public let createdUnix: Int64
+
+    public var hasBoundingBoxes: Bool {
+        version >= IVFHeader.supportedVersionV2
+    }
+
+    public var hasClusterVectors: Bool {
+        version >= IVFHeader.supportedVersionV3
+    }
 }
 
 public enum IVFError: Error, Sendable, CustomStringConvertible {
@@ -46,8 +56,12 @@ public enum IVFError: Error, Sendable, CustomStringConvertible {
 public final class IVFIndex: @unchecked Sendable {
     public let header: IVFHeader
     public let centroidsOffset: Int
+    public let bboxMinOffset: Int?
+    public let bboxMaxOffset: Int?
     public let offsetsOffset: Int
     public let postingsOffset: Int
+    public let orderedVectorsOffset: Int?
+    public let orderedLabelsOffset: Int?
 
     private let basePointer: UnsafeRawPointer
     private let mappedSize: Int
@@ -62,8 +76,32 @@ public final class IVFIndex: @unchecked Sendable {
         return UnsafeBufferPointer(start: start, count: header.clusterCount + 1)
     }
 
+    public var bboxMin: UnsafeBufferPointer<Int16>? {
+        guard let bboxMinOffset else { return nil }
+        let start = basePointer.advanced(by: bboxMinOffset).assumingMemoryBound(to: Int16.self)
+        return UnsafeBufferPointer(start: start, count: header.clusterCount * header.stride)
+    }
+
+    public var bboxMax: UnsafeBufferPointer<Int16>? {
+        guard let bboxMaxOffset else { return nil }
+        let start = basePointer.advanced(by: bboxMaxOffset).assumingMemoryBound(to: Int16.self)
+        return UnsafeBufferPointer(start: start, count: header.clusterCount * header.stride)
+    }
+
     public var postings: UnsafeBufferPointer<UInt32> {
         let start = basePointer.advanced(by: postingsOffset).assumingMemoryBound(to: UInt32.self)
+        return UnsafeBufferPointer(start: start, count: header.count)
+    }
+
+    public var orderedVectors: UnsafeBufferPointer<Int16>? {
+        guard let orderedVectorsOffset else { return nil }
+        let start = basePointer.advanced(by: orderedVectorsOffset).assumingMemoryBound(to: Int16.self)
+        return UnsafeBufferPointer(start: start, count: header.count * header.stride)
+    }
+
+    public var orderedLabels: UnsafeBufferPointer<UInt8>? {
+        guard let orderedLabelsOffset else { return nil }
+        let start = basePointer.advanced(by: orderedLabelsOffset).assumingMemoryBound(to: UInt8.self)
         return UnsafeBufferPointer(start: start, count: header.count)
     }
 
@@ -72,15 +110,23 @@ public final class IVFIndex: @unchecked Sendable {
         mappedSize: Int,
         header: IVFHeader,
         centroidsOffset: Int,
+        bboxMinOffset: Int?,
+        bboxMaxOffset: Int?,
         offsetsOffset: Int,
-        postingsOffset: Int
+        postingsOffset: Int,
+        orderedVectorsOffset: Int?,
+        orderedLabelsOffset: Int?
     ) {
         self.basePointer = basePointer
         self.mappedSize = mappedSize
         self.header = header
         self.centroidsOffset = centroidsOffset
+        self.bboxMinOffset = bboxMinOffset
+        self.bboxMaxOffset = bboxMaxOffset
         self.offsetsOffset = offsetsOffset
         self.postingsOffset = postingsOffset
+        self.orderedVectorsOffset = orderedVectorsOffset
+        self.orderedLabelsOffset = orderedLabelsOffset
     }
 
     deinit {
@@ -102,7 +148,7 @@ public final class IVFIndex: @unchecked Sendable {
             throw IVFError.badMagic(magic)
         }
         let version = data.load(fromByteOffset: 4, as: UInt32.self).littleEndian
-        guard version == IVFHeader.supportedVersion else {
+        guard version == IVFHeader.supportedVersionV1 || version == IVFHeader.supportedVersionV2 || version == IVFHeader.supportedVersionV3 else {
             throw IVFError.unsupportedVersion(version)
         }
         let count = data.load(fromByteOffset: 8, as: UInt64.self).littleEndian
@@ -146,15 +192,53 @@ public final class IVFIndex: @unchecked Sendable {
             let bufferPointer = UnsafeRawBufferPointer(start: basePointer, count: fileSize)
             let header = try parseHeader(bufferPointer)
             let centroidsOffset = IVFHeader.bytes
-            let offsetsOffset = alignUp(
-                centroidsOffset + header.clusterCount * header.stride * MemoryLayout<Int16>.size,
-                to: IVFHeader.pageAlignment
-            )
+            let centroidsBytes = header.clusterCount * header.stride * MemoryLayout<Int16>.size
+            let bboxBytes = centroidsBytes
+            let bboxMinOffset: Int?
+            let bboxMaxOffset: Int?
+            let offsetsOffset: Int
+            let orderedVectorsOffset: Int?
+            let orderedLabelsOffset: Int?
+            if header.hasBoundingBoxes {
+                bboxMinOffset = alignUp(
+                    centroidsOffset + centroidsBytes,
+                    to: IVFHeader.pageAlignment
+                )
+                bboxMaxOffset = alignUp(
+                    bboxMinOffset! + bboxBytes,
+                    to: IVFHeader.pageAlignment
+                )
+                offsetsOffset = alignUp(
+                    bboxMaxOffset! + bboxBytes,
+                    to: IVFHeader.pageAlignment
+                )
+            } else {
+                bboxMinOffset = nil
+                bboxMaxOffset = nil
+                offsetsOffset = alignUp(
+                    centroidsOffset + centroidsBytes,
+                    to: IVFHeader.pageAlignment
+                )
+            }
             let postingsOffset = alignUp(
                 offsetsOffset + (header.clusterCount + 1) * MemoryLayout<UInt32>.size,
                 to: IVFHeader.pageAlignment
             )
-            let expectedSize = postingsOffset + header.count * MemoryLayout<UInt32>.size
+            let basePostingsEnd = postingsOffset + header.count * MemoryLayout<UInt32>.size
+            let expectedSize: Int
+            if header.hasClusterVectors {
+                orderedVectorsOffset = alignUp(basePostingsEnd, to: IVFHeader.pageAlignment)
+                let orderedVectorsBytes = header.count * header.stride * MemoryLayout<Int16>.size
+                orderedLabelsOffset = alignUp(
+                    orderedVectorsOffset! + orderedVectorsBytes,
+                    to: IVFHeader.pageAlignment
+                )
+                expectedSize = orderedLabelsOffset! + header.count * MemoryLayout<UInt8>.size
+            } else {
+                orderedVectorsOffset = nil
+                orderedLabelsOffset = nil
+                expectedSize = basePostingsEnd
+            }
             guard expectedSize == fileSize else {
                 munmap(mapped, fileSize)
                 throw IVFError.fileSizeMismatch(expected: expectedSize, got: fileSize)
@@ -165,8 +249,12 @@ public final class IVFIndex: @unchecked Sendable {
                 mappedSize: fileSize,
                 header: header,
                 centroidsOffset: centroidsOffset,
+                bboxMinOffset: bboxMinOffset,
+                bboxMaxOffset: bboxMaxOffset,
                 offsetsOffset: offsetsOffset,
-                postingsOffset: postingsOffset
+                postingsOffset: postingsOffset,
+                orderedVectorsOffset: orderedVectorsOffset,
+                orderedLabelsOffset: orderedLabelsOffset
             )
         } catch {
             munmap(mapped, fileSize)
