@@ -151,6 +151,70 @@ struct SearchTests {
         #expect(ivfFraudVotes == exactFraudVotes)
     }
 
+    @Test func adaptiveIVFExpandsAmbiguousVotesBeforeDeciding() throws {
+        let cluster0: [(vector: [Int16], label: UInt8)] = [
+            ([10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 1),
+            ([20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 1),
+            ([30, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 0),
+            ([40, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 0),
+            ([50, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 0),
+        ]
+        let cluster1: [(vector: [Int16], label: UInt8)] = [
+            ([1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 1),
+            ([2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 1),
+            ([3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 1),
+            ([4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 0),
+            ([5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 0),
+        ]
+        let records = cluster0 + cluster1
+        let referencesURL = try writeReferences(records)
+        let ivfURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ref-\(UUID().uuidString).ivf")
+        defer {
+            try? FileManager.default.removeItem(at: referencesURL)
+            try? FileManager.default.removeItem(at: ivfURL)
+        }
+
+        let centroids: [Int16] = [
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ]
+        let offsets: [UInt32] = [0, 5, 10]
+        let postings: [UInt32] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+        try writeIVF(
+            path: ivfURL,
+            count: records.count,
+            clusterCount: 2,
+            centroids: centroids,
+            offsets: offsets,
+            postings: postings
+        )
+
+        let index = try ReferencesIndex.load(path: referencesURL.path)
+        let ivf = try IVFIndex.load(path: ivfURL.path)
+        let query: [Int16] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+        let exactFraudVotes = KNN.fraudVoteCount(query: query, in: index, k: 5)
+        let singleProbeVotes = KNN.fraudVoteCount(
+            query: query,
+            in: index,
+            ivf: ivf,
+            config: SearchConfig(nprobe: 1),
+            k: 5
+        )
+        let adaptiveVotes = KNN.fraudVoteCount(
+            query: query,
+            in: index,
+            ivf: ivf,
+            config: SearchConfig(nprobe: 2, initialNprobe: 1),
+            k: 5
+        )
+
+        #expect(singleProbeVotes == 2)
+        #expect(exactFraudVotes == 3)
+        #expect(adaptiveVotes == exactFraudVotes)
+    }
+
 
     private func writeReferences(_ records: [(vector: [Int16], label: UInt8)]) throws -> URL {
         let url = FileManager.default.temporaryDirectory

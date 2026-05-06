@@ -76,8 +76,34 @@ public enum KNN {
         config: SearchConfig,
         k: Int
     ) -> Int {
+        let initialVotes = fraudVoteCountIVF(
+            query: query,
+            in: index,
+            ivf: ivf,
+            nprobe: config.initialNprobe,
+            k: k
+        )
+        guard config.shouldExpand(after: initialVotes) else {
+            return initialVotes
+        }
+        return fraudVoteCountIVF(
+            query: query,
+            in: index,
+            ivf: ivf,
+            nprobe: config.nprobe,
+            k: k
+        )
+    }
+
+    private static func fraudVoteCountIVF(
+        query: [Int16],
+        in index: ReferencesIndex,
+        ivf: IVFIndex,
+        nprobe: Int,
+        k: Int
+    ) -> Int {
         let clusterCount = ivf.header.clusterCount
-        let nprobe = min(max(1, config.nprobe), clusterCount)
+        let nprobe = min(max(1, nprobe), clusterCount)
         precondition(k > 0, "k must be positive")
 
         let centroidNeighbors = query.withUnsafeBufferPointer { queryBuffer in
@@ -105,7 +131,7 @@ public enum KNN {
         }
 
         if candidateCount < k {
-            return fraudVoteCount(query: query, in: index, ivf: nil, config: config, k: k)
+            return fraudVoteCount(query: query, in: index, k: k)
         }
 
         return withUnsafeTemporaryAllocation(of: UInt32.self, capacity: candidateCount) { candidates in

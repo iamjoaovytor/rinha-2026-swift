@@ -69,6 +69,9 @@ struct RinhaAPI {
         let mccRiskPath = env["MCC_RISK_JSON"] ?? mccRiskPathDefault
         let ivfPath = env["IVF_BIN"] ?? IVFIndex.defaultPath(for: referencesPath)
         let nprobe = env["IVF_NPROBE"].flatMap(Int.init) ?? 4
+        let initialNprobe = env["IVF_INITIAL_NPROBE"].flatMap(Int.init)
+        let adaptiveMinFraudVotes = env["IVF_ADAPTIVE_MIN_VOTES"].flatMap(Int.init) ?? 2
+        let adaptiveMaxFraudVotes = env["IVF_ADAPTIVE_MAX_VOTES"].flatMap(Int.init) ?? 3
 
         Task.detached {
             do {
@@ -85,12 +88,23 @@ struct RinhaAPI {
                 let loaded = LoadedState(
                     index: index,
                     ivf: ivf,
-                    searchConfig: SearchConfig(nprobe: nprobe),
+                    searchConfig: SearchConfig(
+                        nprobe: nprobe,
+                        initialNprobe: initialNprobe,
+                        adaptiveMinFraudVotes: adaptiveMinFraudVotes,
+                        adaptiveMaxFraudVotes: adaptiveMaxFraudVotes
+                    ),
                     vectorizer: Vectorizer(mccRisk: mccRisk)
                 )
                 state.install(loaded)
+                let adaptiveDetails: String
+                if loaded.searchConfig.adaptiveEnabled {
+                    adaptiveDetails = ", initial_nprobe=\(loaded.searchConfig.initialNprobe), ambiguous_votes=\(loaded.searchConfig.adaptiveMinFraudVotes)...\(loaded.searchConfig.adaptiveMaxFraudVotes)"
+                } else {
+                    adaptiveDetails = ""
+                }
                 FileHandle.standardError.write(Data(
-                    "loader: ready (count=\(index.header.count), scale=\(index.header.scale), ivf=\(ivf != nil ? "on" : "off"), nprobe=\(nprobe))\n".utf8
+                    "loader: ready (count=\(index.header.count), scale=\(index.header.scale), ivf=\(ivf != nil ? "on" : "off"), nprobe=\(loaded.searchConfig.nprobe)\(adaptiveDetails))\n".utf8
                 ))
             } catch {
                 let message = "\(error)"
