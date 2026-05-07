@@ -110,7 +110,7 @@ public struct Vectorizer: Sendable {
         return v
     }
 
-    func quantize(
+    public func quantize(
         transactionAmount: Double,
         installments: Int,
         requestedAt: ISO8601Fixed,

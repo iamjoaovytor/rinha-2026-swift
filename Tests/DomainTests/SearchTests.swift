@@ -171,6 +171,104 @@ struct SearchTests {
         #expect(ivfFraudVotes == exactFraudVotes)
     }
 
+    @Test func ivfpqRoundTripAndFraudVoteMatchesExactOnContiguousIVF() throws {
+        let records: [(vector: [Int16], label: UInt8)] = [
+            (vector: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], label: 0),
+            (vector: [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], label: 1),
+            (vector: [50, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], label: 1),
+            (vector: [52, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], label: 0),
+        ]
+        let referencesURL = try writeReferences(records)
+        let ivfURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ref-\(UUID().uuidString).ivf")
+        let pqURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ref-\(UUID().uuidString).pq")
+        defer {
+            try? FileManager.default.removeItem(at: referencesURL)
+            try? FileManager.default.removeItem(at: ivfURL)
+            try? FileManager.default.removeItem(at: pqURL)
+        }
+
+        let centroids: [Int16] = [
+            1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            51, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ]
+        let bboxMin: [Int16] = [
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            50, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ]
+        let bboxMax: [Int16] = [
+            2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            52, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ]
+        let offsets: [UInt32] = [0, 2, 4]
+        let postings: [UInt32] = [0, 1, 2, 3]
+        let orderedVectors = records.flatMap(\.vector)
+        let orderedLabels = records.map(\.label)
+        try writeIVF(
+            path: ivfURL,
+            count: records.count,
+            clusterCount: 2,
+            centroids: centroids,
+            bboxMin: bboxMin,
+            bboxMax: bboxMax,
+            offsets: offsets,
+            postings: postings,
+            orderedVectors: orderedVectors,
+            orderedLabels: orderedLabels
+        )
+
+        var codebooks = [Int16](repeating: 0, count: 4 * 256 * 4)
+        func writeCentroid(subvector: Int, code: Int, lane0: Int16) {
+            let base = (subvector * 256 + code) * 4
+            codebooks[base] = lane0
+            codebooks[base + 1] = 0
+            codebooks[base + 2] = 0
+            codebooks[base + 3] = 0
+        }
+        writeCentroid(subvector: 0, code: 0, lane0: 0)
+        writeCentroid(subvector: 0, code: 1, lane0: 2)
+        writeCentroid(subvector: 0, code: 2, lane0: 50)
+        writeCentroid(subvector: 0, code: 3, lane0: 52)
+        let codes: [UInt8] = [
+            0, 0, 0, 0,
+            1, 0, 0, 0,
+            2, 0, 0, 0,
+            3, 0, 0, 0,
+        ]
+        try writeIVFPQ(
+            path: pqURL,
+            count: records.count,
+            stride: 16,
+            subvectorCount: 4,
+            subvectorWidth: 4,
+            codebooks: codebooks,
+            codes: codes
+        )
+
+        let index = try ReferencesIndex.load(path: referencesURL.path)
+        let ivf = try IVFIndex.load(path: ivfURL.path)
+        let pq = try IVFPQIndex.load(path: pqURL.path)
+
+        #expect(pq.header.count == records.count)
+        #expect(pq.header.stride == 16)
+        #expect(pq.header.subvectorCount == 4)
+        #expect(pq.header.subvectorWidth == 4)
+
+        let query: [Int16] = [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        let exactFraudVotes = KNN.fraudVoteCount(query: query, in: index, k: 3)
+        let ivfpqFraudVotes = KNN.fraudVoteCount(
+            query: query,
+            in: index,
+            ivf: ivf,
+            pq: pq,
+            config: SearchConfig(nprobe: 2, ivfpqRerankCandidates: 6),
+            k: 3
+        )
+
+        #expect(ivfpqFraudVotes == exactFraudVotes)
+    }
+
     @Test func adaptiveIVFExpandsAmbiguousVotesBeforeDeciding() throws {
         let cluster0: [(vector: [Int16], label: UInt8)] = [
             ([10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 1),
@@ -244,6 +342,75 @@ struct SearchTests {
         #expect(singleProbeVotes == 2)
         #expect(exactFraudVotes == 3)
         #expect(adaptiveVotes == exactFraudVotes)
+    }
+
+    @Test func ivfUsesBoundingBoxesToRecoverCloserClusterOutsideNProbe() throws {
+        let cluster0: [(vector: [Int16], label: UInt8)] = [
+            ([10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 0),
+            ([11, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 0),
+            ([12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 0),
+        ]
+        let cluster1: [(vector: [Int16], label: UInt8)] = [
+            ([1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 1),
+            ([2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 1),
+            ([3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 1),
+        ]
+        let records = cluster0 + cluster1
+        let referencesURL = try writeReferences(records)
+        let ivfURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ref-\(UUID().uuidString).ivf")
+        defer {
+            try? FileManager.default.removeItem(at: referencesURL)
+            try? FileManager.default.removeItem(at: ivfURL)
+        }
+
+        let centroids: [Int16] = [
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            100, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ]
+        let bboxMin: [Int16] = [
+            10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ]
+        let bboxMax: [Int16] = [
+            12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ]
+        let offsets: [UInt32] = [0, 3, 6]
+        let postings: [UInt32] = [0, 1, 2, 3, 4, 5]
+        let orderedVectors = records.flatMap(\.vector)
+        let orderedLabels = records.map(\.label)
+        try writeIVF(
+            path: ivfURL,
+            count: records.count,
+            clusterCount: 2,
+            centroids: centroids,
+            bboxMin: bboxMin,
+            bboxMax: bboxMax,
+            offsets: offsets,
+            postings: postings,
+            orderedVectors: orderedVectors,
+            orderedLabels: orderedLabels
+        )
+
+        let index = try ReferencesIndex.load(path: referencesURL.path)
+        let ivf = try IVFIndex.load(path: ivfURL.path)
+        let query: [Int16] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        var metrics = SearchMetrics()
+
+        let exactFraudVotes = KNN.fraudVoteCount(query: query, in: index, k: 3)
+        let ivfFraudVotes = KNN.fraudVoteCount(
+            query: query,
+            in: index,
+            ivf: ivf,
+            config: SearchConfig(nprobe: 1),
+            metrics: &metrics,
+            k: 3
+        )
+
+        #expect(exactFraudVotes == 3)
+        #expect(ivfFraudVotes == exactFraudVotes)
+        #expect(metrics.exactFallbackCount == 0)
     }
 
 
@@ -327,6 +494,34 @@ struct SearchTests {
             padTo(alignment: 4096, in: &data)
             data.append(contentsOf: orderedLabels ?? [])
         }
+        try data.write(to: path)
+    }
+
+    private func writeIVFPQ(
+        path: URL,
+        count: Int,
+        stride: Int,
+        subvectorCount: Int,
+        subvectorWidth: Int,
+        codebooks: [Int16],
+        codes: [UInt8]
+    ) throws {
+        var data = Data()
+        data.append(contentsOf: [0x52, 0x56, 0x51, 0x50])
+        appendLE(UInt32(1), to: &data)
+        appendLE(UInt64(count), to: &data)
+        appendLE(UInt32(stride), to: &data)
+        appendLE(UInt32(subvectorCount), to: &data)
+        appendLE(UInt32(subvectorWidth), to: &data)
+        appendLE(UInt32(0), to: &data)
+        appendLE(Int64(0), to: &data)
+        if data.count < 64 {
+            data.append(Data(repeating: 0, count: 64 - data.count))
+        }
+
+        for lane in codebooks { appendLE(lane, to: &data) }
+        padTo(alignment: 4096, in: &data)
+        data.append(contentsOf: codes)
         try data.write(to: path)
     }
 

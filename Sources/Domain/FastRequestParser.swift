@@ -5,10 +5,24 @@ public enum FastRequestParser {
         case malformed
     }
 
-    public static func quantizedQuery(
-        from body: UnsafeRawBufferPointer,
-        vectorizer: Vectorizer
-    ) throws -> [Int16] {
+    public struct ParsedQuery: Sendable {
+        public let transactionAmount: Double
+        public let installments: Int
+        public let requestedAt: ISO8601Fixed
+        public let customerAvgAmount: Double
+        public let customerTxCount24h: Int
+        public let knownMerchant: Bool
+        public let merchantAvgAmount: Double
+        public let terminalIsOnline: Bool
+        public let terminalCardPresent: Bool
+        public let terminalKmFromHome: Double
+        public let merchantMccCode: Int
+        public let lastTransaction: (timestamp: ISO8601Fixed, kmFromCurrent: Double)?
+    }
+
+    public static func parsedQuery(
+        from body: UnsafeRawBufferPointer
+    ) throws -> ParsedQuery {
         let bytes = body.bindMemory(to: UInt8.self)
         var cursor = Cursor(bytes: bytes)
 
@@ -87,7 +101,7 @@ public enum FastRequestParser {
         try cursor.consumeObjectEnd()
         try cursor.consumeEOF()
 
-        return vectorizer.quantize(
+        return ParsedQuery(
             transactionAmount: transactionAmount,
             installments: installments,
             requestedAt: requestedAt,
@@ -100,6 +114,27 @@ public enum FastRequestParser {
             terminalKmFromHome: terminalKmFromHome,
             merchantMccCode: merchantMccCode,
             lastTransaction: lastTransaction
+        )
+    }
+
+    public static func quantizedQuery(
+        from body: UnsafeRawBufferPointer,
+        vectorizer: Vectorizer
+    ) throws -> [Int16] {
+        let parsed = try parsedQuery(from: body)
+        return vectorizer.quantize(
+            transactionAmount: parsed.transactionAmount,
+            installments: parsed.installments,
+            requestedAt: parsed.requestedAt,
+            customerAvgAmount: parsed.customerAvgAmount,
+            customerTxCount24h: parsed.customerTxCount24h,
+            knownMerchant: parsed.knownMerchant,
+            merchantAvgAmount: parsed.merchantAvgAmount,
+            terminalIsOnline: parsed.terminalIsOnline,
+            terminalCardPresent: parsed.terminalCardPresent,
+            terminalKmFromHome: parsed.terminalKmFromHome,
+            merchantMccCode: parsed.merchantMccCode,
+            lastTransaction: parsed.lastTransaction
         )
     }
 

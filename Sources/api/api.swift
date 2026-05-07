@@ -9,6 +9,7 @@ import NIOPosix
 struct LoadedState: Sendable {
     let index: ReferencesIndex
     let ivf: IVFIndex?
+    let pq: IVFPQIndex?
     let searchConfig: SearchConfig
     let vectorizer: Vectorizer
 }
@@ -64,14 +65,19 @@ struct RinhaAPI {
 
         let eventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         let state = LoaderState()
+        let debugStats = DebugStatsCollector(
+            enabled: ProcessInfo.processInfo.environment["DEBUG_STATS"] == "1"
+        )
         let env = ProcessInfo.processInfo.environment
         let referencesPath = env["REFERENCES_BIN"] ?? referencesPathDefault
         let mccRiskPath = env["MCC_RISK_JSON"] ?? mccRiskPathDefault
         let ivfPath = env["IVF_BIN"] ?? IVFIndex.defaultPath(for: referencesPath)
+        let ivfpqPath = env["IVFPQ_BIN"] ?? IVFPQIndex.defaultPath(for: referencesPath)
         let nprobe = env["IVF_NPROBE"].flatMap(Int.init) ?? 4
         let initialNprobe = env["IVF_INITIAL_NPROBE"].flatMap(Int.init)
         let adaptiveMinFraudVotes = env["IVF_ADAPTIVE_MIN_VOTES"].flatMap(Int.init) ?? 2
         let adaptiveMaxFraudVotes = env["IVF_ADAPTIVE_MAX_VOTES"].flatMap(Int.init) ?? 3
+        let ivfpqRerankCandidates = env["IVFPQ_RERANK_CANDIDATES"].flatMap(Int.init)
         let useBoundingBoxes = env["IVF_USE_BBOX"] == "1"
 
         Task.detached {
@@ -85,15 +91,24 @@ struct RinhaAPI {
                 } else {
                     ivf = nil
                 }
+                let pq: IVFPQIndex?
+                if FileManager.default.fileExists(atPath: ivfpqPath) {
+                    pq = try IVFPQIndex.load(path: ivfpqPath)
+                    pq?.warm()
+                } else {
+                    pq = nil
+                }
                 index.warm()
                 let loaded = LoadedState(
                     index: index,
                     ivf: ivf,
+                    pq: pq,
                     searchConfig: SearchConfig(
                         nprobe: nprobe,
                         initialNprobe: initialNprobe,
                         adaptiveMinFraudVotes: adaptiveMinFraudVotes,
                         adaptiveMaxFraudVotes: adaptiveMaxFraudVotes,
+                        ivfpqRerankCandidates: ivfpqRerankCandidates,
                         useBoundingBoxes: useBoundingBoxes
                     ),
                     vectorizer: Vectorizer(mccRisk: mccRisk)
@@ -105,9 +120,15 @@ struct RinhaAPI {
                 } else {
                     adaptiveDetails = ""
                 }
+                let pqDetails: String
+                if loaded.searchConfig.ivfpqEnabled {
+                    pqDetails = ", pq=on, pq_rerank=\(loaded.searchConfig.ivfpqRerankCandidates ?? 0)"
+                } else {
+                    pqDetails = ", pq=\(pq != nil ? "loaded" : "off")"
+                }
                 let bboxDetails = loaded.searchConfig.useBoundingBoxes ? ", bbox=on" : ", bbox=off"
                 FileHandle.standardError.write(Data(
-                    "loader: ready (count=\(index.header.count), scale=\(index.header.scale), ivf=\(ivf != nil ? "on" : "off"), nprobe=\(loaded.searchConfig.nprobe)\(adaptiveDetails)\(bboxDetails))\n".utf8
+                    "loader: ready (count=\(index.header.count), scale=\(index.header.scale), ivf=\(ivf != nil ? "on" : "off")\(pqDetails), nprobe=\(loaded.searchConfig.nprobe)\(adaptiveDetails)\(bboxDetails))\n".utf8
                 ))
             } catch {
                 let message = "\(error)"
@@ -121,37 +142,104 @@ struct RinhaAPI {
             state.isReady ? .ok : .serviceUnavailable
         }
 
+        router.get("/debug/stats") { _, _ -> Response in
+            do {
+                return jsonResponse(body: try debugStats.jsonData())
+            } catch {
+                return jsonResponse(body: fallbackBody)
+            }
+        }
+
+        router.post("/debug/stats/reset") { _, _ -> Response in
+            debugStats.reset()
+            return jsonResponse(body: Data(#"{"ok":true}"#.utf8))
+        }
+
         router.post("/fraud-score") { request, context -> Response in
             guard let loaded = state.current else {
                 return jsonResponse(body: fallbackBody)
             }
+            var metrics = RequestPhaseMetrics()
             do {
+                let bodyCollectStarted = DispatchTime.now().uptimeNanoseconds
                 let bodyBuffer = try await request.body.collect(upTo: 64 * 1024)
+                metrics.bodyCollectNs = DispatchTime.now().uptimeNanoseconds - bodyCollectStarted
                 let quantized: [Int16]
                 do {
-                    quantized = try bodyBuffer.withUnsafeReadableBytes { rawBuffer in
-                        try FastRequestParser.quantizedQuery(
-                            from: rawBuffer,
-                            vectorizer: loaded.vectorizer
-                        )
+                    let parseStarted = DispatchTime.now().uptimeNanoseconds
+                    let parsed = try bodyBuffer.withUnsafeReadableBytes { rawBuffer in
+                        try FastRequestParser.parsedQuery(from: rawBuffer)
                     }
+                    metrics.parseNs = DispatchTime.now().uptimeNanoseconds - parseStarted
+                    let vectorizeStarted = DispatchTime.now().uptimeNanoseconds
+                    quantized = loaded.vectorizer.quantize(
+                        transactionAmount: parsed.transactionAmount,
+                        installments: parsed.installments,
+                        requestedAt: parsed.requestedAt,
+                        customerAvgAmount: parsed.customerAvgAmount,
+                        customerTxCount24h: parsed.customerTxCount24h,
+                        knownMerchant: parsed.knownMerchant,
+                        merchantAvgAmount: parsed.merchantAvgAmount,
+                        terminalIsOnline: parsed.terminalIsOnline,
+                        terminalCardPresent: parsed.terminalCardPresent,
+                        terminalKmFromHome: parsed.terminalKmFromHome,
+                        merchantMccCode: parsed.merchantMccCode,
+                        lastTransaction: parsed.lastTransaction
+                    )
+                    metrics.vectorizeNs = DispatchTime.now().uptimeNanoseconds - vectorizeStarted
+                    metrics.fastPath = true
                 } catch {
                     let body = Data(bodyBuffer.readableBytesView)
+                    let parseStarted = DispatchTime.now().uptimeNanoseconds
                     let fraudRequest = try decoder.decode(FraudRequest.self, from: body)
+                    metrics.parseNs = DispatchTime.now().uptimeNanoseconds - parseStarted
+                    let vectorizeStarted = DispatchTime.now().uptimeNanoseconds
                     let raw = try loaded.vectorizer.vectorize(fraudRequest)
                     quantized = loaded.vectorizer.quantize(raw)
+                    metrics.vectorizeNs = DispatchTime.now().uptimeNanoseconds - vectorizeStarted
+                    metrics.fallbackPath = true
                 }
-                let fraudVotes = KNN.fraudVoteCount(
-                    query: quantized,
-                    in: loaded.index,
-                    ivf: loaded.ivf,
-                    config: loaded.searchConfig,
-                    k: 5
-                )
-                return jsonResponse(body: FraudScoring.responseBody(fraudVoteCount: fraudVotes))
+                let searchStarted = DispatchTime.now().uptimeNanoseconds
+                let rawFraudVotes: Int
+                if debugStats.isEnabled {
+                    var searchMetrics = SearchMetrics()
+                    rawFraudVotes = KNN.fraudVoteCount(
+                        query: quantized,
+                        in: loaded.index,
+                        ivf: loaded.ivf,
+                        pq: loaded.pq,
+                        config: loaded.searchConfig,
+                        metrics: &searchMetrics,
+                        k: 5
+                    )
+                    metrics.searchCentroidNs = searchMetrics.centroidSearchNs
+                    metrics.searchShortlistNs = searchMetrics.shortlistNs
+                    metrics.searchExactFallbackCount = searchMetrics.exactFallbackCount
+                    metrics.searchAdaptiveExpandCount = searchMetrics.adaptiveExpandCount
+                } else {
+                    rawFraudVotes = KNN.fraudVoteCount(
+                        query: quantized,
+                        in: loaded.index,
+                        ivf: loaded.ivf,
+                        pq: loaded.pq,
+                        config: loaded.searchConfig,
+                        k: 5
+                    )
+                }
+                metrics.searchNs = DispatchTime.now().uptimeNanoseconds - searchStarted
+                let responseStarted = DispatchTime.now().uptimeNanoseconds
+                let response = jsonResponse(body: FraudScoring.responseBody(fraudVoteCount: rawFraudVotes))
+                metrics.responseNs = DispatchTime.now().uptimeNanoseconds - responseStarted
+                debugStats.record(metrics)
+                return response
             } catch {
                 context.logger.debug("fraud-score: \(error)")
-                return jsonResponse(body: fallbackBody)
+                metrics.failed = true
+                let responseStarted = DispatchTime.now().uptimeNanoseconds
+                let response = jsonResponse(body: fallbackBody)
+                metrics.responseNs = DispatchTime.now().uptimeNanoseconds - responseStarted
+                debugStats.record(metrics)
+                return response
             }
         }
 
