@@ -20,7 +20,7 @@ import Foundation
 
 enum Preprocess {
     static let magic: [UInt8] = [0x52, 0x4E, 0x48, 0x41] // "RNHA"
-    static let formatVersion: UInt32 = 1
+    static let formatVersion: UInt32 = 14
     static let dim: UInt32 = 14
     static let stride: UInt32 = 16
     static let layoutAoS: UInt32 = 0

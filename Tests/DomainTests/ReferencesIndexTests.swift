@@ -8,11 +8,11 @@ struct ReferencesIndexTests {
         let header = try bytes.withUnsafeBufferPointer { buffer in
             try ReferencesIndex.parseHeader(UnsafeRawBufferPointer(buffer))
         }
-        #expect(header.version == 1)
+        #expect(header.version == 14)
         #expect(header.count == 3_000_000)
         #expect(header.dim == 14)
         #expect(header.stride == 16)
-        #expect(header.scale == 8192)
+        #expect(header.scale == 10000)
         #expect(header.layout == ReferencesHeader.layoutAoS)
         #expect(header.sha256.count == 32)
         #expect(header.sha256[0] == 0xAB)
@@ -34,7 +34,7 @@ struct ReferencesIndexTests {
 
     @Test func rejectsUnsupportedVersion() {
         var bytes = makeHeader()
-        bytes[4] = 0x09
+        bytes[4] = 0x0D
         #expect {
             _ = try bytes.withUnsafeBufferPointer { buffer in
                 try ReferencesIndex.parseHeader(UnsafeRawBufferPointer(buffer))
@@ -75,16 +75,16 @@ struct ReferencesIndexTests {
         var bytes = [UInt8](repeating: 0, count: ReferencesHeader.bytes)
         // magic "RNHA" little-endian.
         bytes[0] = 0x52; bytes[1] = 0x4E; bytes[2] = 0x48; bytes[3] = 0x41
-        // version = 1.
-        bytes[4] = 0x01
+        // version = 14.
+        bytes[4] = 0x0E
         // count = 3_000_000 (UInt64 LE).
         writeLE(UInt64(3_000_000), into: &bytes, at: 8)
         // dim = 14.
         writeLE(UInt32(14), into: &bytes, at: 16)
         // stride = 16.
         writeLE(UInt32(16), into: &bytes, at: 20)
-        // scale = 8192.
-        writeLE(Int32(8192), into: &bytes, at: 24)
+        // scale = 10000.
+        writeLE(Int32(10000), into: &bytes, at: 24)
         // layout = 0 (AoS).
         writeLE(UInt32(0), into: &bytes, at: 28)
         // sha256: marker byte at offset 32 so tests can spot-check.

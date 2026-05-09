@@ -115,12 +115,12 @@ struct VectorizerTests {
         ])
         #expect(q.count == 16)
         #expect(q[0] == 0)
-        #expect(q[1] == 8192)
-        #expect(q[2] == -8192)
-        #expect(q[3] == 4096)
-        #expect(q[4] == 2048)
-        #expect(q[5] == 34)   // 0.0041 * 8192 ≈ 33.59
-        #expect(q[6] == 1366) // 0.1667 * 8192 ≈ 1365.4
+        #expect(q[1] == 10000)
+        #expect(q[2] == -10000)
+        #expect(q[3] == 5000)
+        #expect(q[4] == 2500)
+        #expect(q[5] == 41)   // rounds 0.0041 * 10000 = 41
+        #expect(q[6] == 1667) // rounds 0.1667 * 10000 = 1667
         #expect(q[14] == 0)
         #expect(q[15] == 0)
     }
@@ -132,8 +132,8 @@ struct VectorizerTests {
             -1, -1,
             0, 0, 0, 0, 0, 0, 0
         ])
-        #expect(q[5] == -8192)
-        #expect(q[6] == -8192)
+        #expect(q[5] == -10000)
+        #expect(q[6] == -10000)
     }
 
     private func expectVector(_ got: [Double], equals expected: [Double]) throws {

@@ -11,6 +11,7 @@ let package = Package(
     products: [
         .executable(name: "api", targets: ["api"]),
         .executable(name: "preprocess", targets: ["preprocess"]),
+        .executable(name: "evaluator", targets: ["evaluator"]),
         .library(name: "Domain", targets: ["Domain"])
     ],
     dependencies: [
@@ -46,6 +47,11 @@ let package = Package(
             name: "preprocess",
             dependencies: ["Domain"],
             path: "Sources/preprocess"
+        ),
+        .executableTarget(
+            name: "evaluator",
+            dependencies: ["Domain"],
+            path: "Sources/evaluator"
         ),
         .testTarget(
             name: "DomainTests",

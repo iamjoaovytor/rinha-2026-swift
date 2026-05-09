@@ -11,7 +11,7 @@ import Foundation
 /// blob and compute the offsets to the label, orig_id, and vector arrays.
 public struct ReferencesHeader: Sendable {
     public static let magic: UInt32 = 0x41_48_4E_52 // "RNHA" little-endian
-    public static let supportedVersion: UInt32 = 1
+    public static let supportedVersion: UInt32 = 14
     public static let layoutAoS: UInt32 = 0
     public static let bytes = 128
     public static let pageAlignment = 4096

@@ -4,8 +4,9 @@ import Foundation
 ///
 /// `scale` controls the `Int16` quantized representation: `0..1` floats map to
 /// `0..scale` and the `-1` sentinel for missing `last_transaction` data maps to
-/// `-scale`. `8192` is a power of two with comfortable headroom for the L2²
-/// accumulator (worst per-lane diff `16384`, square `~268M`, times 14 lanes
+/// `-scale`. `10000` preserves the current training and quantization format
+/// while keeping enough headroom for the L2² accumulator (worst per-lane diff
+/// `20000`, square `~400M`, times 14 lanes
 /// `~3.76B` — fits in `Int64`).
 
 struct VectorizerConstants: Sendable {
@@ -17,7 +18,7 @@ struct VectorizerConstants: Sendable {
     var maxTxCount24h: Double = 20
     var maxMerchantAvgAmount: Double = 10_000
 
-    var scale: Int16 = 8192
+    var scale: Int16 = 10000
 
     static let `default` = VectorizerConstants()
 }

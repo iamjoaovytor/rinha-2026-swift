@@ -421,11 +421,11 @@ struct SearchTests {
         let count = records.count
 
         data.append(contentsOf: [0x52, 0x4E, 0x48, 0x41])
-        appendLE(UInt32(1), to: &data)
+        appendLE(UInt32(14), to: &data)
         appendLE(UInt64(count), to: &data)
         appendLE(UInt32(14), to: &data)
         appendLE(UInt32(16), to: &data)
-        appendLE(Int32(8192), to: &data)
+        appendLE(Int32(10000), to: &data)
         appendLE(UInt32(0), to: &data)
         data.append(Data(repeating: 0, count: 32)) // sha placeholder
         appendLE(Int64(0), to: &data)

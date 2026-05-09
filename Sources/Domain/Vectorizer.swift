@@ -126,8 +126,8 @@ public struct Vectorizer: Sendable {
     ) -> [Int16] {
         var lanes = [Int16](repeating: 0, count: 16)
 
-        lanes[0] = quantizeUnitInterval(transactionAmount / constants.maxAmount)
-        lanes[1] = quantizeUnitInterval(Double(installments) / constants.maxInstallments)
+        lanes[0] = quantizeRoundedUnitInterval(transactionAmount / constants.maxAmount)
+        lanes[1] = quantizeRoundedUnitInterval(Double(installments) / constants.maxInstallments)
 
         let amountVsAvg: Double
         if customerAvgAmount > 0 {
@@ -135,27 +135,27 @@ public struct Vectorizer: Sendable {
         } else {
             amountVsAvg = 1.0
         }
-        lanes[2] = quantizeUnitInterval(amountVsAvg)
-        lanes[3] = quantizeUnitInterval(Double(requestedAt.hour) / 23.0)
-        lanes[4] = quantizeUnitInterval(Double(requestedAt.weekdayMon0) / 6.0)
+        lanes[2] = quantizeRoundedUnitInterval(amountVsAvg)
+        lanes[3] = quantizeRoundedUnitInterval(Double(requestedAt.hour) / 23.0)
+        lanes[4] = quantizeRoundedUnitInterval(Double(requestedAt.weekdayMon0) / 6.0)
 
         if let lastTransaction {
             let deltaSeconds = max(0, requestedAt.epochSeconds - lastTransaction.timestamp.epochSeconds)
             let minutes = Double(deltaSeconds) / 60.0
-            lanes[5] = quantizeUnitInterval(minutes / constants.maxMinutes)
-            lanes[6] = quantizeUnitInterval(lastTransaction.kmFromCurrent / constants.maxKm)
+            lanes[5] = quantizeRoundedUnitInterval(minutes / constants.maxMinutes)
+            lanes[6] = quantizeRoundedUnitInterval(lastTransaction.kmFromCurrent / constants.maxKm)
         } else {
             lanes[5] = -constants.scale
             lanes[6] = -constants.scale
         }
 
-        lanes[7] = quantizeUnitInterval(terminalKmFromHome / constants.maxKm)
-        lanes[8] = quantizeUnitInterval(Double(customerTxCount24h) / constants.maxTxCount24h)
+        lanes[7] = quantizeRoundedUnitInterval(terminalKmFromHome / constants.maxKm)
+        lanes[8] = quantizeRoundedUnitInterval(Double(customerTxCount24h) / constants.maxTxCount24h)
         lanes[9] = terminalIsOnline ? constants.scale : 0
         lanes[10] = terminalCardPresent ? constants.scale : 0
         lanes[11] = knownMerchant ? 0 : constants.scale
-        lanes[12] = quantizeUnitInterval(mccRisk.risk(for: merchantMccCode))
-        lanes[13] = quantizeUnitInterval(merchantAvgAmount / constants.maxMerchantAvgAmount)
+        lanes[12] = quantizeRoundedUnitInterval(mccRisk.risk(for: merchantMccCode))
+        lanes[13] = quantizeRoundedUnitInterval(merchantAvgAmount / constants.maxMerchantAvgAmount)
 
         return lanes
     }
@@ -174,7 +174,15 @@ public struct Vectorizer: Sendable {
             if x == -1 {
                 lanes[i] = -constants.scale
             } else {
-                let scaled = (x * scaleDouble).rounded()
+                let scaled: Double
+                switch i {
+                case 0, 1, 2, 3, 4, 5, 6, 7, 8, 12, 13:
+                    scaled = (x * scaleDouble).rounded()
+                case 9, 10, 11:
+                    scaled = x * scaleDouble
+                default:
+                    scaled = x * scaleDouble
+                }
                 lanes[i] = Int16(min(int16Max, max(int16Min, scaled)))
             }
         }
@@ -187,9 +195,10 @@ public struct Vectorizer: Sendable {
     }
 
     @inline(__always)
-    private func quantizeUnitInterval(_ x: Double) -> Int16 {
+    private func quantizeRoundedUnitInterval(_ x: Double) -> Int16 {
         let scaleDouble = Double(constants.scale)
         let clamped = clamp(x)
         return Int16((clamped * scaleDouble).rounded())
     }
+
 }
