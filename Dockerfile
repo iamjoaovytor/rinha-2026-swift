@@ -16,6 +16,14 @@ RUN --mount=type=cache,target=/root/.cache \
     --mount=type=cache,target=/src/.build \
     mkdir -p /out/resources \
     && swift build -c release --product api \
+        -Xswiftc -O \
+        -Xswiftc -wmo \
+        -Xswiftc -enforce-exclusivity=unchecked \
+        -Xswiftc -gnone \
+        -Xcc -O3 \
+        -Xcc -march=x86-64-v3 \
+        -Xcc -mavx2 \
+        -Xcc -mfma \
     && BIN_DIR=$(dirname "$(find /src/.build -type f -path '*/release/api' | head -n 1)") \
     && cp "$BIN_DIR/api" /out/api \
     && cp /src/resources/references.bin /out/resources/references.bin \
@@ -29,6 +37,14 @@ RUN --mount=type=cache,target=/root/.cache \
     --mount=type=cache,target=/root/.swiftpm \
     --mount=type=cache,target=/src/.build \
     swift build -c release --product api --product preprocess \
+        -Xswiftc -O \
+        -Xswiftc -wmo \
+        -Xswiftc -enforce-exclusivity=unchecked \
+        -Xswiftc -gnone \
+        -Xcc -O3 \
+        -Xcc -march=x86-64-v3 \
+        -Xcc -mavx2 \
+        -Xcc -mfma \
     && cd /src/resources \
     && sha256sum -c references.sha256 \
     && mkdir -p /out/resources \

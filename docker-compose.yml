@@ -18,12 +18,13 @@ services:
     volumes:
       - sockets:/sockets
     cpus: "0.40"
-    mem_limit: "160MB"
+    cpuset: "0"
+    mem_limit: "130MB"
     deploy:
       resources:
         limits:
           cpus: "0.40"
-          memory: "160MB"
+          memory: "130MB"
 
   api2:
     <<: *api
@@ -32,6 +33,7 @@ services:
       SOCKET_PATH: "/sockets/api2.sock"
     volumes:
       - sockets:/sockets
+    cpuset: "1"
 
   lb:
     image: haproxy:3.3-alpine
@@ -45,12 +47,13 @@ services:
       - api1
       - api2
     cpus: "0.20"
-    mem_limit: "30MB"
+    cpuset: "2"
+    mem_limit: "90MB"
     deploy:
       resources:
         limits:
           cpus: "0.20"
-          memory: "30MB"
+          memory: "90MB"
 
 volumes:
   sockets:
