@@ -47,24 +47,74 @@ static inline int64_t rinha_distance_squared_scalar(
 }
 
 #if defined(__x86_64__) || defined(__i386__)
-__attribute__((target("avx2")))
-static int64_t rinha_distance_squared_avx2_16(
-    const int16_t *query,
+__attribute__((target("avx2"), always_inline))
+static inline int64_t rinha_distance_squared_avx2_16(
+    __m256i q,
     const int16_t *record
 ) {
-    __m256i q = _mm256_loadu_si256((const __m256i *)query);
     __m256i r = _mm256_loadu_si256((const __m256i *)record);
     __m256i diff = _mm256_sub_epi16(q, r);
     __m256i pair_sums = _mm256_madd_epi16(diff, diff);
+    // Horizontal sum of 8 int32s in pair_sums.
+    __m128i lo = _mm256_castsi256_si128(pair_sums);
+    __m128i hi = _mm256_extracti128_si256(pair_sums, 1);
+    __m128i s = _mm_add_epi32(lo, hi);
+    s = _mm_add_epi32(s, _mm_shuffle_epi32(s, 0x4E));
+    s = _mm_add_epi32(s, _mm_shuffle_epi32(s, 0xB1));
+    return (int64_t)_mm_cvtsi128_si32(s);
+}
 
-    int32_t lanes[8];
-    _mm256_storeu_si256((__m256i *)lanes, pair_sums);
-
-    int64_t sum = 0;
-    for (size_t i = 0; i < 8; i++) {
-        sum += lanes[i];
+__attribute__((target("avx2")))
+static void rinha_topk_avx2_contiguous(
+    const int16_t *query,
+    const int16_t *vectors,
+    size_t count,
+    size_t stride,
+    size_t k,
+    rinha_neighbor_t *out_neighbors
+) {
+    __m256i q = _mm256_loadu_si256((const __m256i *)query);
+    const size_t prefetch_distance = 8;
+    for (size_t record_index = 0; record_index < count; record_index++) {
+        const int16_t *record = vectors + (record_index * stride);
+        if (record_index + prefetch_distance < count) {
+            _mm_prefetch((const char *)(vectors + ((record_index + prefetch_distance) * stride)), _MM_HINT_T0);
+        }
+        int64_t distance_squared = rinha_distance_squared_avx2_16(q, record);
+        rinha_neighbor_t candidate = {
+            .record_index = (int32_t)record_index,
+            .distance_squared = distance_squared,
+        };
+        rinha_insert_neighbor(candidate, k, out_neighbors);
     }
-    return sum;
+}
+
+__attribute__((target("avx2")))
+static void rinha_topk_avx2_indexed(
+    const int16_t *query,
+    const int16_t *vectors,
+    const uint32_t *record_indices,
+    size_t candidate_count,
+    size_t stride,
+    size_t k,
+    rinha_neighbor_t *out_neighbors
+) {
+    __m256i q = _mm256_loadu_si256((const __m256i *)query);
+    const size_t prefetch_distance = 8;
+    for (size_t i = 0; i < candidate_count; i++) {
+        const uint32_t record_index = record_indices[i];
+        const int16_t *record = vectors + ((size_t)record_index * stride);
+        if (i + prefetch_distance < candidate_count) {
+            const uint32_t pf_idx = record_indices[i + prefetch_distance];
+            _mm_prefetch((const char *)(vectors + ((size_t)pf_idx * stride)), _MM_HINT_T0);
+        }
+        int64_t distance_squared = rinha_distance_squared_avx2_16(q, record);
+        rinha_neighbor_t candidate = {
+            .record_index = (int32_t)record_index,
+            .distance_squared = distance_squared,
+        };
+        rinha_insert_neighbor(candidate, k, out_neighbors);
+    }
 }
 
 static int rinha_supports_avx2(void) {
@@ -92,23 +142,15 @@ void rinha_topk_exact_i16(
     rinha_init_neighbors(k, out_neighbors);
 
 #if defined(__x86_64__) || defined(__i386__)
-    const int use_avx2 = (stride == 16 && dim <= 16 && rinha_supports_avx2());
+    if (stride == 16 && dim <= 16 && rinha_supports_avx2()) {
+        rinha_topk_avx2_contiguous(query, vectors, count, stride, k, out_neighbors);
+        return;
+    }
 #endif
 
     for (size_t record_index = 0; record_index < count; record_index++) {
         const int16_t *record = vectors + (record_index * stride);
-        int64_t distance_squared;
-
-#if defined(__x86_64__) || defined(__i386__)
-        if (use_avx2) {
-            distance_squared = rinha_distance_squared_avx2_16(query, record);
-        } else {
-            distance_squared = rinha_distance_squared_scalar(query, record, dim);
-        }
-#else
-        distance_squared = rinha_distance_squared_scalar(query, record, dim);
-#endif
-
+        int64_t distance_squared = rinha_distance_squared_scalar(query, record, dim);
         rinha_neighbor_t candidate = {
             .record_index = (int32_t)record_index,
             .distance_squared = distance_squared,
@@ -134,24 +176,16 @@ void rinha_topk_exact_i16_indexed(
     rinha_init_neighbors(k, out_neighbors);
 
 #if defined(__x86_64__) || defined(__i386__)
-    const int use_avx2 = (stride == 16 && dim <= 16 && rinha_supports_avx2());
+    if (stride == 16 && dim <= 16 && rinha_supports_avx2()) {
+        rinha_topk_avx2_indexed(query, vectors, record_indices, candidate_count, stride, k, out_neighbors);
+        return;
+    }
 #endif
 
     for (size_t i = 0; i < candidate_count; i++) {
         const uint32_t record_index = record_indices[i];
         const int16_t *record = vectors + ((size_t)record_index * stride);
-        int64_t distance_squared;
-
-#if defined(__x86_64__) || defined(__i386__)
-        if (use_avx2) {
-            distance_squared = rinha_distance_squared_avx2_16(query, record);
-        } else {
-            distance_squared = rinha_distance_squared_scalar(query, record, dim);
-        }
-#else
-        distance_squared = rinha_distance_squared_scalar(query, record, dim);
-#endif
-
+        int64_t distance_squared = rinha_distance_squared_scalar(query, record, dim);
         rinha_neighbor_t candidate = {
             .record_index = (int32_t)record_index,
             .distance_squared = distance_squared,
