@@ -14,7 +14,9 @@ services:
       IVFPQ_RERANK_CANDIDATES: "${IVFPQ_RERANK_CANDIDATES:-}"
       IVF_USE_BBOX: "${IVF_USE_BBOX:-0}"
       DEBUG_STATS: "${DEBUG_STATS:-0}"
-      PORT: "3001"
+      SOCKET_PATH: "/sockets/api1.sock"
+    volumes:
+      - sockets:/sockets
     cpus: "0.40"
     mem_limit: "160MB"
     deploy:
@@ -27,7 +29,9 @@ services:
     <<: *api
     environment:
       <<: *api_env
-      PORT: "3002"
+      SOCKET_PATH: "/sockets/api2.sock"
+    volumes:
+      - sockets:/sockets
 
   lb:
     image: haproxy:3.3-alpine
@@ -36,6 +40,7 @@ services:
       - "9999:9999"
     volumes:
       - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+      - sockets:/sockets
     depends_on:
       - api1
       - api2
@@ -46,3 +51,6 @@ services:
         limits:
           cpus: "0.20"
           memory: "30MB"
+
+volumes:
+  sockets:
