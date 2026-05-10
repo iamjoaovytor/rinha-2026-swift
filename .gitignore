@@ -12,3 +12,4 @@ PLAN.md
 /test/*-results.json
 /test/stress-results-*.json
 /test/*-docker-stats.log
+/.claude/
