@@ -36,7 +36,24 @@ FROM build-base AS build-submission
 RUN --mount=type=cache,target=/root/.cache \
     --mount=type=cache,target=/root/.swiftpm \
     --mount=type=cache,target=/src/.build \
-    swift build -c release --product api --product preprocess \
+    rm -rf /src/.build 2>/dev/null || true \
+    && swift build -c release --product api \
+        -Xswiftc -O \
+        -Xswiftc -wmo \
+        -Xswiftc -enforce-exclusivity=unchecked \
+        -Xswiftc -gnone \
+        -Xswiftc -use-ld=lld \
+        -Xcc -O3 \
+        -Xcc -march=x86-64-v3 \
+        -Xcc -mtune=haswell \
+        -Xcc -mavx2 \
+        -Xcc -mfma \
+        -Xcc -flto=thin \
+        -Xcc -funroll-loops \
+        -Xcc -falign-functions=64 \
+        -Xcc -falign-loops=64 \
+        -Xlinker --icf=all \
+    && swift build -c release --product preprocess \
         -Xswiftc -O \
         -Xswiftc -wmo \
         -Xswiftc -enforce-exclusivity=unchecked \
@@ -57,6 +74,8 @@ RUN --mount=type=cache,target=/root/.cache \
     && mkdir -p /out/resources \
     && API_BIN=$(find /src/.build -type f -path '*/release/api' | head -n 1) \
     && PREPROCESS_BIN=$(find /src/.build -type f -path '*/release/preprocess' | head -n 1) \
+    && test -n "$API_BIN" || (echo "ERROR: api binary not found" && false) \
+    && test -n "$PREPROCESS_BIN" || (echo "ERROR: preprocess binary not found" && false) \
     && IVFPQ_BUILD=1 \
        IVFPQ_SUBVECTORS=4 \
        IVFPQ_TRAIN_SAMPLE=131072 \
