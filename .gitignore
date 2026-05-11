@@ -6,10 +6,16 @@ DerivedData/
 .swiftpm/configuration/registries.json
 .swiftpm/xcode/package.xcworkspace/contents.xcworkspacedata
 .netrc
+plan.md
 PLAN.md
-/resources/
-/test/results.json
-/test/*-results.json
-/test/stress-results-*.json
-/test/*-docker-stats.log
 /.claude/
+/docs/
+/test/
+/scripts/
+
+# resources: ship only raw inputs needed by Dockerfile build-submission
+/resources/*
+!/resources/normalization.json
+!/resources/mcc_risk.json
+!/resources/references.json.gz
+!/resources/references.sha256

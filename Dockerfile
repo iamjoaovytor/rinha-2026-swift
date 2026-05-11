@@ -41,10 +41,17 @@ RUN --mount=type=cache,target=/root/.cache \
         -Xswiftc -wmo \
         -Xswiftc -enforce-exclusivity=unchecked \
         -Xswiftc -gnone \
+        -Xswiftc -use-ld=lld \
         -Xcc -O3 \
         -Xcc -march=x86-64-v3 \
+        -Xcc -mtune=haswell \
         -Xcc -mavx2 \
         -Xcc -mfma \
+        -Xcc -flto=thin \
+        -Xcc -funroll-loops \
+        -Xcc -falign-functions=64 \
+        -Xcc -falign-loops=64 \
+        -Xlinker --icf=all \
     && cd /src/resources \
     && sha256sum -c references.sha256 \
     && mkdir -p /out/resources \

@@ -1,11 +1,7 @@
 services:
   api1: &api
-    image: rinha-2026-swift:local
+    image: joaovytor/rinha-2026-swift:v2
     platform: linux/amd64
-    build:
-      context: .
-      dockerfile: Dockerfile
-      target: runtime-local
     environment: &api_env
       IVF_NPROBE: "${IVF_NPROBE:-12}"
       IVF_INITIAL_NPROBE: "${IVF_INITIAL_NPROBE:-12}"
@@ -14,11 +10,11 @@ services:
       IVFPQ_RERANK_CANDIDATES: "${IVFPQ_RERANK_CANDIDATES:-}"
       IVF_USE_BBOX: "${IVF_USE_BBOX:-0}"
       DEBUG_STATS: "${DEBUG_STATS:-0}"
+      WARMUP_COUNT: "${WARMUP_COUNT:-50000}"
       SOCKET_PATH: "/sockets/api1.sock"
     volumes:
       - sockets:/sockets
-    cpus: "0.40"
-    cpuset: "0"
+    cpus: "0.35"
     mem_limit: "130MB"
     security_opt:
       - seccomp:unconfined
@@ -29,7 +25,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.40"
+          cpus: "0.35"
           memory: "130MB"
 
   api2:
@@ -39,7 +35,6 @@ services:
       SOCKET_PATH: "/sockets/api2.sock"
     volumes:
       - sockets:/sockets
-    cpuset: "1"
 
   lb:
     image: haproxy:3.3-alpine
@@ -52,8 +47,7 @@ services:
     depends_on:
       - api1
       - api2
-    cpus: "0.20"
-    cpuset: "2"
+    cpus: "0.30"
     mem_limit: "90MB"
     security_opt:
       - seccomp:unconfined
@@ -64,7 +58,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.20"
+          cpus: "0.30"
           memory: "90MB"
 
 volumes:
