@@ -232,7 +232,7 @@ public enum KNN {
 
             return withUnsafeTemporaryAllocation(of: rinha_neighbor_t.self, capacity: k) { rawNeighbors in
                 query.withUnsafeBufferPointer { queryBuffer in
-                    rinha_topk_exact_i16_indexed(
+                    rinha_topk_exact_i16_indexed_filtered(
                         queryBuffer.baseAddress,
                         index.vectors.baseAddress,
                         candidates.baseAddress,
@@ -245,7 +245,7 @@ public enum KNN {
                     let labels = index.labels
                     var fraudVotes = 0
                     for neighbor in UnsafeBufferPointer(start: rawNeighbors.baseAddress, count: k)
-                    where labels[Int(neighbor.record_index)] == 1 {
+                    where neighbor.record_index >= 0 && labels[Int(neighbor.record_index)] == 1 {
                         fraudVotes += 1
                     }
                     metricRecord(shortlistStarted, keyPath: \.shortlistNs, metrics: metrics)
@@ -705,7 +705,7 @@ public enum KNN {
         return withUnsafeTemporaryAllocation(of: rinha_neighbor_t.self, capacity: min(k, candidateCount)) { rawNeighbors in
             query.withUnsafeBufferPointer { queryBuffer in
                 let vectorsBase = orderedVectors.baseAddress!.advanced(by: start * stride)
-                rinha_topk_exact_i16(
+                rinha_topk_exact_i16_filtered(
                     queryBuffer.baseAddress,
                     vectorsBase,
                     numericCast(candidateCount),
@@ -745,7 +745,7 @@ public enum KNN {
         return withUnsafeTemporaryAllocation(of: rinha_neighbor_t.self, capacity: k) { rawNeighbors in
             query.withUnsafeBufferPointer { queryBuffer in
                 let candidates = postings.baseAddress!.advanced(by: start)
-                rinha_topk_exact_i16_indexed(
+                rinha_topk_exact_i16_indexed_filtered(
                     queryBuffer.baseAddress,
                     index.vectors.baseAddress,
                     candidates,
