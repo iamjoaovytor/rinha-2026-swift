@@ -1,6 +1,6 @@
 services:
   api1: &api
-    image: joaovytor/rinha-2026-swift:v2
+    image: joaovytor/rinha-2026-swift:v3
     platform: linux/amd64
     environment: &api_env
       IVF_NPROBE: "${IVF_NPROBE:-12}"
