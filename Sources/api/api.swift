@@ -1,10 +1,9 @@
 import Domain
 import Foundation
-import Hummingbird
-import Logging
 import NIOConcurrencyHelpers
 import NIOCore
 import NIOPosix
+import NIOHTTP1
 
 struct LoadedState: Sendable {
     let index: ReferencesIndex
@@ -30,10 +29,6 @@ final class LoaderState: @unchecked Sendable {
         self.state.withLockedValue { $0.loaded != nil }
     }
 
-    var lastError: String? {
-        self.state.withLockedValue { $0.failure }
-    }
-
     func install(_ loaded: LoadedState) {
         self.state.withLockedValue { state in
             state.loaded = loaded
@@ -54,15 +49,10 @@ struct RinhaAPI {
     static let referencesPathDefault = "/app/resources/references.bin"
     static let mccRiskPathDefault = "/app/resources/mcc_risk.json"
     static let fallbackBody = #"{"approved":false,"fraud_score":1.0}"#
+    static let okBody = #"{"ok":true}"#
     static let decoder = JSONDecoder()
 
     static func main() async throws {
-        LoggingSystem.bootstrap { label in
-            var handler = StreamLogHandler.standardOutput(label: label)
-            handler.logLevel = .critical
-            return handler
-        }
-
         let eventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         let state = LoaderState()
         let debugStats = DebugStatsCollector(
@@ -115,181 +105,43 @@ struct RinhaAPI {
                 )
                 Self.synthesizeAndWarmKNN(loaded: loaded)
                 state.install(loaded)
-                let adaptiveDetails: String
-                if loaded.searchConfig.adaptiveEnabled {
-                    adaptiveDetails = ", initial_nprobe=\(loaded.searchConfig.initialNprobe), ambiguous_votes=\(loaded.searchConfig.adaptiveMinFraudVotes)...\(loaded.searchConfig.adaptiveMaxFraudVotes)"
-                } else {
-                    adaptiveDetails = ""
-                }
-                let pqDetails: String
-                if loaded.searchConfig.ivfpqEnabled {
-                    pqDetails = ", pq=on, pq_rerank=\(loaded.searchConfig.ivfpqRerankCandidates ?? 0)"
-                } else {
-                    pqDetails = ", pq=\(pq != nil ? "loaded" : "off")"
-                }
-                let bboxDetails = loaded.searchConfig.useBoundingBoxes ? ", bbox=on" : ", bbox=off"
                 FileHandle.standardError.write(Data(
-                    "loader: ready (count=\(index.header.count), scale=\(index.header.scale), ivf=\(ivf != nil ? "on" : "off")\(pqDetails), nprobe=\(loaded.searchConfig.nprobe)\(adaptiveDetails)\(bboxDetails))\n".utf8
+                    "loader: ready (count=\(index.header.count), scale=\(index.header.scale), nprobe=\(loaded.searchConfig.nprobe))\n".utf8
                 ))
             } catch {
-                let message = "\(error)"
-                state.recordFailure(message)
-                FileHandle.standardError.write(Data("loader: \(message)\n".utf8))
+                state.recordFailure("\(error)")
+                FileHandle.standardError.write(Data("loader: \(error)\n".utf8))
             }
         }
 
-        let router = Router()
-        router.get("/ready") { _, _ -> HTTPResponse.Status in
-            state.isReady ? .ok : .serviceUnavailable
-        }
-
-        router.get("/debug/stats") { _, _ -> Response in
-            do {
-                return jsonResponse(body: try debugStats.jsonData())
-            } catch {
-                return jsonResponse(body: fallbackBody)
-            }
-        }
-
-        router.post("/debug/stats/reset") { _, _ -> Response in
-            debugStats.reset()
-            return jsonResponse(body: Data(#"{"ok":true}"#.utf8))
-        }
-
-        router.post("/fraud-score") { request, context -> Response in
-            guard let loaded = state.current else {
-                return jsonResponse(body: fallbackBody)
-            }
-            var metrics = RequestPhaseMetrics()
-            do {
-                let bodyCollectStarted = DispatchTime.now().uptimeNanoseconds
-                let bodyBuffer = try await request.body.collect(upTo: 64 * 1024)
-                metrics.bodyCollectNs = DispatchTime.now().uptimeNanoseconds - bodyCollectStarted
-                let quantized: [Int16]
-                do {
-                    let parseStarted = DispatchTime.now().uptimeNanoseconds
-                    let parsed = try bodyBuffer.withUnsafeReadableBytes { rawBuffer in
-                        try FastRequestParser.parsedQuery(from: rawBuffer)
-                    }
-                    metrics.parseNs = DispatchTime.now().uptimeNanoseconds - parseStarted
-                    let vectorizeStarted = DispatchTime.now().uptimeNanoseconds
-                    quantized = loaded.vectorizer.quantize(
-                        transactionAmount: parsed.transactionAmount,
-                        installments: parsed.installments,
-                        requestedAt: parsed.requestedAt,
-                        customerAvgAmount: parsed.customerAvgAmount,
-                        customerTxCount24h: parsed.customerTxCount24h,
-                        knownMerchant: parsed.knownMerchant,
-                        merchantAvgAmount: parsed.merchantAvgAmount,
-                        terminalIsOnline: parsed.terminalIsOnline,
-                        terminalCardPresent: parsed.terminalCardPresent,
-                        terminalKmFromHome: parsed.terminalKmFromHome,
-                        merchantMccCode: parsed.merchantMccCode,
-                        lastTransaction: parsed.lastTransaction
-                    )
-                    metrics.vectorizeNs = DispatchTime.now().uptimeNanoseconds - vectorizeStarted
-                    metrics.fastPath = true
-                } catch {
-                    let body = Data(bodyBuffer.readableBytesView)
-                    let parseStarted = DispatchTime.now().uptimeNanoseconds
-                    let fraudRequest = try decoder.decode(FraudRequest.self, from: body)
-                    metrics.parseNs = DispatchTime.now().uptimeNanoseconds - parseStarted
-                    let vectorizeStarted = DispatchTime.now().uptimeNanoseconds
-                    let raw = try loaded.vectorizer.vectorize(fraudRequest)
-                    quantized = loaded.vectorizer.quantize(raw)
-                    metrics.vectorizeNs = DispatchTime.now().uptimeNanoseconds - vectorizeStarted
-                    metrics.fallbackPath = true
-                }
-                let searchStarted = DispatchTime.now().uptimeNanoseconds
-                let rawFraudVotes: Int
-                if debugStats.isEnabled {
-                    var searchMetrics = SearchMetrics()
-                    rawFraudVotes = KNN.fraudVoteCount(
-                        query: quantized,
-                        in: loaded.index,
-                        ivf: loaded.ivf,
-                        pq: loaded.pq,
-                        config: loaded.searchConfig,
-                        metrics: &searchMetrics,
-                        k: 5
-                    )
-                    metrics.searchCentroidNs = searchMetrics.centroidSearchNs
-                    metrics.searchShortlistNs = searchMetrics.shortlistNs
-                    metrics.searchExactFallbackCount = searchMetrics.exactFallbackCount
-                    metrics.searchAdaptiveExpandCount = searchMetrics.adaptiveExpandCount
-                } else {
-                    rawFraudVotes = KNN.fraudVoteCount(
-                        query: quantized,
-                        in: loaded.index,
-                        ivf: loaded.ivf,
-                        pq: loaded.pq,
-                        config: loaded.searchConfig,
-                        k: 5
-                    )
-                }
-                metrics.searchNs = DispatchTime.now().uptimeNanoseconds - searchStarted
-                let responseStarted = DispatchTime.now().uptimeNanoseconds
-                let response = jsonResponse(body: FraudScoring.responseBody(fraudVoteCount: rawFraudVotes))
-                metrics.responseNs = DispatchTime.now().uptimeNanoseconds - responseStarted
-                debugStats.record(metrics)
-                return response
-            } catch {
-                context.logger.debug("fraud-score: \(error)")
-                metrics.failed = true
-                let responseStarted = DispatchTime.now().uptimeNanoseconds
-                let response = jsonResponse(body: fallbackBody)
-                metrics.responseNs = DispatchTime.now().uptimeNanoseconds - responseStarted
-                debugStats.record(metrics)
-                return response
-            }
-        }
-
-        var logger = Logger(label: "rinha-api")
-        logger.logLevel = .critical
-
-        let configuration = ApplicationConfiguration(
-            address: bindAddress(),
-            serverName: nil,
-            backlog: 16384
-        )
-
-        let app = Application(
-            router: router,
-            configuration: configuration,
-            eventLoopGroupProvider: .shared(eventLoopGroup),
-            logger: logger
-        )
-
-        do {
-            try await app.runService()
-            try await eventLoopGroup.shutdownGracefully()
-        } catch {
-            try? await eventLoopGroup.shutdownGracefully()
-            throw error
-        }
-    }
-
-    private static func bindAddress() -> BindAddress {
-        let environment = ProcessInfo.processInfo.environment
-        if let socketPath = environment["SOCKET_PATH"], !socketPath.isEmpty {
+        let serverChannel: Channel
+        if let socketPath = env["SOCKET_PATH"], !socketPath.isEmpty {
             try? FileManager.default.removeItem(atPath: socketPath)
-            return .unixDomainSocket(path: socketPath)
+            let bootstrap = ServerBootstrap(group: eventLoopGroup)
+                .serverChannelOption(ChannelOptions.backlog, value: 16384)
+                .childChannelOption(ChannelOptions.maxMessagesPerRead, value: 16)
+                .childChannelInitializer { channel in
+                    channel.pipeline.configureHTTPServerPipeline(withErrorHandling: true).flatMap {
+                        channel.pipeline.addHandler(FraudHandler(state: state, debugStats: debugStats))
+                    }
+                }
+            serverChannel = try await bootstrap.bind(unixDomainSocketPath: socketPath).get()
+        } else {
+            let port = env["PORT"].flatMap(Int.init) ?? 9999
+            let bootstrap = ServerBootstrap(group: eventLoopGroup)
+                .serverChannelOption(ChannelOptions.backlog, value: 16384)
+                .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
+                .childChannelOption(ChannelOptions.socketOption(.tcp_nodelay), value: 1)
+                .childChannelOption(ChannelOptions.maxMessagesPerRead, value: 16)
+                .childChannelInitializer { channel in
+                    channel.pipeline.configureHTTPServerPipeline(withErrorHandling: true).flatMap {
+                        channel.pipeline.addHandler(FraudHandler(state: state, debugStats: debugStats))
+                    }
+                }
+            serverChannel = try await bootstrap.bind(host: "0.0.0.0", port: port).get()
         }
-
-        let port = environment["PORT"].flatMap(Int.init) ?? 9999
-        return .hostname("0.0.0.0", port: port)
-    }
-
-    private static func jsonResponse(body: String) -> Response {
-        var buffer = ByteBufferAllocator().buffer(capacity: body.utf8.count)
-        buffer.writeString(body)
-        return makeResponse(buffer: buffer)
-    }
-
-    private static func jsonResponse(body: Data) -> Response {
-        var buffer = ByteBufferAllocator().buffer(capacity: body.count)
-        buffer.writeBytes(body)
-        return makeResponse(buffer: buffer)
+        try await serverChannel.closeFuture.get()
+        try await eventLoopGroup.shutdownGracefully()
     }
 
     private static func synthesizeAndWarmKNN(loaded: LoadedState) {
@@ -307,7 +159,6 @@ struct RinhaAPI {
             for lane in 0..<stride {
                 query[lane] = basePtr[recIdx * stride + lane]
             }
-            // Perturb a couple lanes so query isn't an exact ref hit (forces full scan path).
             query[0] = query[0] &+ 17
             query[7] = query[7] &+ 23
             sink &+= KNN.fraudVoteCount(
@@ -334,15 +185,187 @@ struct RinhaAPI {
             return z ^ (z >> 31)
         }
     }
+}
 
-    private static func makeResponse(buffer: ByteBuffer) -> Response {
-        Response(
-            status: .ok,
-            headers: [
-                .contentType: "application/json",
-                .contentLength: "\(buffer.readableBytes)"
-            ],
-            body: .init(byteBuffer: buffer)
-        )
+private final class FraudHandler: ChannelInboundHandler {
+    typealias InboundIn = HTTPServerRequestPart
+    typealias OutboundOut = HTTPServerResponsePart
+
+    private let state: LoaderState
+    private let debugStats: DebugStatsCollector
+    private var head: HTTPRequestHead?
+    private var body: ByteBuffer?
+
+    init(state: LoaderState, debugStats: DebugStatsCollector) {
+        self.state = state
+        self.debugStats = debugStats
+    }
+
+    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+        let part = unwrapInboundIn(data)
+        switch part {
+        case .head(let head):
+            self.head = head
+            self.body = nil
+        case .body(var buffer):
+            if self.body == nil {
+                self.body = buffer
+            } else {
+                self.body!.writeBuffer(&buffer)
+            }
+        case .end:
+            guard let head = self.head else { return }
+            handle(context: context, head: head, body: self.body)
+            self.head = nil
+            self.body = nil
+        }
+    }
+
+    private func handle(context: ChannelHandlerContext, head: HTTPRequestHead, body: ByteBuffer?) {
+        let keepAlive = head.isKeepAlive
+        switch (head.method, head.uri) {
+        case (.POST, "/fraud-score"):
+            handleFraud(context: context, body: body, keepAlive: keepAlive)
+        case (.GET, "/ready"):
+            let status: HTTPResponseStatus = state.isReady ? .ok : .serviceUnavailable
+            writeEmpty(context: context, status: status, keepAlive: keepAlive)
+        case (.GET, "/debug/stats"):
+            do {
+                let data = try debugStats.jsonData()
+                var buf = context.channel.allocator.buffer(capacity: data.count)
+                buf.writeBytes(data)
+                writeJSON(context: context, status: .ok, buffer: buf, keepAlive: keepAlive)
+            } catch {
+                writeJSONString(context: context, status: .internalServerError, body: RinhaAPI.fallbackBody, keepAlive: keepAlive)
+            }
+        case (.POST, "/debug/stats/reset"):
+            debugStats.reset()
+            writeJSONString(context: context, status: .ok, body: RinhaAPI.okBody, keepAlive: keepAlive)
+        default:
+            writeEmpty(context: context, status: .notFound, keepAlive: keepAlive)
+        }
+    }
+
+    private func handleFraud(context: ChannelHandlerContext, body: ByteBuffer?, keepAlive: Bool) {
+        guard let loaded = state.current, let body = body else {
+            writeJSONString(context: context, status: .ok, body: RinhaAPI.fallbackBody, keepAlive: keepAlive)
+            return
+        }
+        var metrics = RequestPhaseMetrics()
+        do {
+            let quantized: [Int16]
+            do {
+                let parseStarted = DispatchTime.now().uptimeNanoseconds
+                let parsed = try body.withUnsafeReadableBytes { rawBuffer in
+                    try FastRequestParser.parsedQuery(from: rawBuffer)
+                }
+                metrics.parseNs = DispatchTime.now().uptimeNanoseconds - parseStarted
+                let vectorizeStarted = DispatchTime.now().uptimeNanoseconds
+                quantized = loaded.vectorizer.quantize(
+                    transactionAmount: parsed.transactionAmount,
+                    installments: parsed.installments,
+                    requestedAt: parsed.requestedAt,
+                    customerAvgAmount: parsed.customerAvgAmount,
+                    customerTxCount24h: parsed.customerTxCount24h,
+                    knownMerchant: parsed.knownMerchant,
+                    merchantAvgAmount: parsed.merchantAvgAmount,
+                    terminalIsOnline: parsed.terminalIsOnline,
+                    terminalCardPresent: parsed.terminalCardPresent,
+                    terminalKmFromHome: parsed.terminalKmFromHome,
+                    merchantMccCode: parsed.merchantMccCode,
+                    lastTransaction: parsed.lastTransaction
+                )
+                metrics.vectorizeNs = DispatchTime.now().uptimeNanoseconds - vectorizeStarted
+                metrics.fastPath = true
+            } catch {
+                let bodyData = Data(body.readableBytesView)
+                let parseStarted = DispatchTime.now().uptimeNanoseconds
+                let fraudRequest = try RinhaAPI.decoder.decode(FraudRequest.self, from: bodyData)
+                metrics.parseNs = DispatchTime.now().uptimeNanoseconds - parseStarted
+                let vectorizeStarted = DispatchTime.now().uptimeNanoseconds
+                let raw = try loaded.vectorizer.vectorize(fraudRequest)
+                quantized = loaded.vectorizer.quantize(raw)
+                metrics.vectorizeNs = DispatchTime.now().uptimeNanoseconds - vectorizeStarted
+                metrics.fallbackPath = true
+            }
+            let searchStarted = DispatchTime.now().uptimeNanoseconds
+            let rawFraudVotes: Int
+            if debugStats.isEnabled {
+                var searchMetrics = SearchMetrics()
+                rawFraudVotes = KNN.fraudVoteCount(
+                    query: quantized,
+                    in: loaded.index,
+                    ivf: loaded.ivf,
+                    pq: loaded.pq,
+                    config: loaded.searchConfig,
+                    metrics: &searchMetrics,
+                    k: 5
+                )
+                metrics.searchCentroidNs = searchMetrics.centroidSearchNs
+                metrics.searchShortlistNs = searchMetrics.shortlistNs
+                metrics.searchExactFallbackCount = searchMetrics.exactFallbackCount
+                metrics.searchAdaptiveExpandCount = searchMetrics.adaptiveExpandCount
+            } else {
+                rawFraudVotes = KNN.fraudVoteCount(
+                    query: quantized,
+                    in: loaded.index,
+                    ivf: loaded.ivf,
+                    pq: loaded.pq,
+                    config: loaded.searchConfig,
+                    k: 5
+                )
+            }
+            metrics.searchNs = DispatchTime.now().uptimeNanoseconds - searchStarted
+            let responseStarted = DispatchTime.now().uptimeNanoseconds
+            writeJSONString(context: context, status: .ok, body: FraudScoring.responseBody(fraudVoteCount: rawFraudVotes), keepAlive: keepAlive)
+            metrics.responseNs = DispatchTime.now().uptimeNanoseconds - responseStarted
+            debugStats.record(metrics)
+        } catch {
+            metrics.failed = true
+            writeJSONString(context: context, status: .ok, body: RinhaAPI.fallbackBody, keepAlive: keepAlive)
+            debugStats.record(metrics)
+        }
+    }
+
+    private func writeJSONString(context: ChannelHandlerContext, status: HTTPResponseStatus, body: String, keepAlive: Bool) {
+        var buf = context.channel.allocator.buffer(capacity: body.utf8.count)
+        buf.writeString(body)
+        writeJSON(context: context, status: status, buffer: buf, keepAlive: keepAlive)
+    }
+
+    private func writeJSON(context: ChannelHandlerContext, status: HTTPResponseStatus, buffer: ByteBuffer, keepAlive: Bool) {
+        var headers = HTTPHeaders()
+        headers.add(name: "content-type", value: "application/json")
+        headers.add(name: "content-length", value: "\(buffer.readableBytes)")
+        if !keepAlive { headers.add(name: "connection", value: "close") }
+        let head = HTTPResponseHead(version: .http1_1, status: status, headers: headers)
+        context.write(wrapOutboundOut(.head(head)), promise: nil)
+        context.write(wrapOutboundOut(.body(.byteBuffer(buffer))), promise: nil)
+        if keepAlive {
+            context.writeAndFlush(wrapOutboundOut(.end(nil)), promise: nil)
+        } else {
+            let promise = context.eventLoop.makePromise(of: Void.self)
+            context.writeAndFlush(wrapOutboundOut(.end(nil)), promise: promise)
+            promise.futureResult.whenComplete { _ in
+                context.close(promise: nil)
+            }
+        }
+    }
+
+    private func writeEmpty(context: ChannelHandlerContext, status: HTTPResponseStatus, keepAlive: Bool) {
+        var headers = HTTPHeaders()
+        headers.add(name: "content-length", value: "0")
+        if !keepAlive { headers.add(name: "connection", value: "close") }
+        let head = HTTPResponseHead(version: .http1_1, status: status, headers: headers)
+        context.write(wrapOutboundOut(.head(head)), promise: nil)
+        if keepAlive {
+            context.writeAndFlush(wrapOutboundOut(.end(nil)), promise: nil)
+        } else {
+            let promise = context.eventLoop.makePromise(of: Void.self)
+            context.writeAndFlush(wrapOutboundOut(.end(nil)), promise: promise)
+            promise.futureResult.whenComplete { _ in
+                context.close(promise: nil)
+            }
+        }
     }
 }

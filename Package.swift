@@ -15,7 +15,6 @@ let package = Package(
         .library(name: "Domain", targets: ["Domain"])
     ],
     dependencies: [
-        .package(url: "https://github.com/hummingbird-project/hummingbird.git", from: "2.22.0"),
         .package(url: "https://github.com/apple/swift-log.git", from: "1.6.0"),
         .package(url: "https://github.com/apple/swift-nio.git", "2.65.0"..<"2.87.0")
     ],
@@ -35,11 +34,11 @@ let package = Package(
             name: "api",
             dependencies: [
                 "Domain",
-                .product(name: "Hummingbird", package: "hummingbird"),
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
                 .product(name: "NIOCore", package: "swift-nio"),
-                .product(name: "NIOPosix", package: "swift-nio")
+                .product(name: "NIOPosix", package: "swift-nio"),
+                .product(name: "NIOHTTP1", package: "swift-nio")
             ],
             path: "Sources/api"
         ),
