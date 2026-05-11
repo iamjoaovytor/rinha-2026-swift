@@ -20,6 +20,12 @@ services:
     cpus: "0.40"
     cpuset: "0"
     mem_limit: "130MB"
+    security_opt:
+      - seccomp:unconfined
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
     deploy:
       resources:
         limits:
@@ -49,6 +55,12 @@ services:
     cpus: "0.20"
     cpuset: "2"
     mem_limit: "90MB"
+    security_opt:
+      - seccomp:unconfined
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
     deploy:
       resources:
         limits:
