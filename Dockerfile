@@ -20,6 +20,7 @@ RUN --mount=type=cache,target=/root/.cache \
         -Xswiftc -wmo \
         -Xswiftc -enforce-exclusivity=unchecked \
         -Xswiftc -gnone \
+        -Xswiftc -DSWIFTNIO_USE_IO_URING \
         -Xcc -O3 \
         -Xcc -march=x86-64-v3 \
         -Xcc -mavx2 \
@@ -41,6 +42,7 @@ RUN --mount=type=cache,target=/root/.cache \
         -Xswiftc -wmo \
         -Xswiftc -enforce-exclusivity=unchecked \
         -Xswiftc -gnone \
+        -Xswiftc -DSWIFTNIO_USE_IO_URING \
         -Xcc -O3 \
         -Xcc -march=x86-64-v3 \
         -Xcc -mavx2 \
