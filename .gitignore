@@ -10,6 +10,7 @@ plan.md
 PLAN.md
 /.claude/
 /docs/
+/scripts/
 /test/
 
 # resources: ship only raw inputs needed by Dockerfile build-submission

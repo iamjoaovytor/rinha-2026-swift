@@ -16,7 +16,7 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-log.git", from: "1.6.0"),
-        .package(url: "https://github.com/apple/swift-nio.git", "2.65.0"..<"2.87.0")
+        .package(url: "https://github.com/iamjoaovytor/swift-nio-handoff.git", exact: "2.86.2-handoff.1")
     ],
     targets: [
         .target(
@@ -35,10 +35,10 @@ let package = Package(
             dependencies: [
                 "Domain",
                 .product(name: "Logging", package: "swift-log"),
-                .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
-                .product(name: "NIOCore", package: "swift-nio"),
-                .product(name: "NIOPosix", package: "swift-nio"),
-                .product(name: "NIOHTTP1", package: "swift-nio")
+                .product(name: "NIOConcurrencyHelpers", package: "swift-nio-handoff"),
+                .product(name: "NIOCore", package: "swift-nio-handoff"),
+                .product(name: "NIOPosix", package: "swift-nio-handoff"),
+                .product(name: "NIOHTTP1", package: "swift-nio-handoff")
             ],
             path: "Sources/api"
         ),

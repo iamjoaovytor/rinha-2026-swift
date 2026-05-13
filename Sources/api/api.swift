@@ -69,6 +69,13 @@ struct RinhaAPI {
         let adaptiveMaxFraudVotes = env["IVF_ADAPTIVE_MAX_VOTES"].flatMap(Int.init) ?? 3
         let ivfpqRerankCandidates = env["IVFPQ_RERANK_CANDIDATES"].flatMap(Int.init)
         let useBoundingBoxes = env["IVF_USE_BBOX"] == "1"
+        let useSocketHandoff = env["SOCKET_HANDOFF"] == "1"
+
+        let channelSetup: @Sendable (Channel) -> EventLoopFuture<Void> = { channel in
+            channel.pipeline.configureHTTPServerPipeline(withErrorHandling: true).flatMap {
+                channel.pipeline.addHandler(FraudHandler(state: state, debugStats: debugStats))
+            }
+        }
 
         Task.detached {
             do {
@@ -114,18 +121,34 @@ struct RinhaAPI {
             }
         }
 
-        let serverChannel: Channel
         if let socketPath = env["SOCKET_PATH"], !socketPath.isEmpty {
-            try? FileManager.default.removeItem(atPath: socketPath)
-            let bootstrap = ServerBootstrap(group: eventLoopGroup)
-                .serverChannelOption(ChannelOptions.backlog, value: 16384)
-                .childChannelOption(ChannelOptions.maxMessagesPerRead, value: 16)
-                .childChannelInitializer { channel in
-                    channel.pipeline.configureHTTPServerPipeline(withErrorHandling: true).flatMap {
-                        channel.pipeline.addHandler(FraudHandler(state: state, debugStats: debugStats))
+            if useSocketHandoff {
+                let ctrlPath = "\(socketPath).ctrl"
+                let bootstrap = ClientBootstrap(group: eventLoopGroup)
+                    .channelOption(ChannelOptions.maxMessagesPerRead, value: 16)
+                    .channelInitializer(channelSetup)
+                let handoffAcceptor = SocketHandoffAcceptor(
+                    ctrlPath: ctrlPath,
+                    bootstrap: bootstrap,
+                    logger: { message in
+                        FileHandle.standardError.write(Data("\(message)\n".utf8))
                     }
+                )
+                try handoffAcceptor.start()
+                FileHandle.standardError.write(Data("handoff: listening on \(ctrlPath)\n".utf8))
+                while true {
+                    try await Task.sleep(nanoseconds: 86_400_000_000_000)
                 }
-            serverChannel = try await bootstrap.bind(unixDomainSocketPath: socketPath).get()
+            } else {
+                try? FileManager.default.removeItem(atPath: socketPath)
+                let bootstrap = ServerBootstrap(group: eventLoopGroup)
+                    .serverChannelOption(ChannelOptions.backlog, value: 16384)
+                    .childChannelOption(ChannelOptions.maxMessagesPerRead, value: 16)
+                    .childChannelInitializer(channelSetup)
+                let serverChannel = try await bootstrap.bind(unixDomainSocketPath: socketPath).get()
+                try await serverChannel.closeFuture.get()
+                try await eventLoopGroup.shutdownGracefully()
+            }
         } else {
             let port = env["PORT"].flatMap(Int.init) ?? 9999
             let bootstrap = ServerBootstrap(group: eventLoopGroup)
@@ -133,15 +156,11 @@ struct RinhaAPI {
                 .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
                 .childChannelOption(ChannelOptions.socketOption(.tcp_nodelay), value: 1)
                 .childChannelOption(ChannelOptions.maxMessagesPerRead, value: 16)
-                .childChannelInitializer { channel in
-                    channel.pipeline.configureHTTPServerPipeline(withErrorHandling: true).flatMap {
-                        channel.pipeline.addHandler(FraudHandler(state: state, debugStats: debugStats))
-                    }
-                }
-            serverChannel = try await bootstrap.bind(host: "0.0.0.0", port: port).get()
+                .childChannelInitializer(channelSetup)
+            let serverChannel = try await bootstrap.bind(host: "0.0.0.0", port: port).get()
+            try await serverChannel.closeFuture.get()
+            try await eventLoopGroup.shutdownGracefully()
         }
-        try await serverChannel.closeFuture.get()
-        try await eventLoopGroup.shutdownGracefully()
     }
 
     private static func synthesizeAndWarmKNN(loaded: LoadedState) {
