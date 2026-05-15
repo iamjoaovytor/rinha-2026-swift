@@ -269,6 +269,50 @@ struct SearchTests {
         #expect(ivfpqFraudVotes == exactFraudVotes)
     }
 
+    @Test func contiguousClusterRawHelperMatchesNeighborProjection() throws {
+        let records: [(vector: [Int16], label: UInt8)] = [
+            (vector: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], label: 0),
+            (vector: [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], label: 1),
+            (vector: [4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], label: 1),
+            (vector: [50, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], label: 0),
+        ]
+        let orderedVectorStorage = records.flatMap(\.vector)
+        let query: [Int16] = [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+        let (projected, rawProjected) = orderedVectorStorage.withUnsafeBufferPointer { orderedVectors in
+            let projected = KNN.exactNeighborsInContiguousCluster(
+                query: query,
+                orderedVectors: orderedVectors,
+                start: 0,
+                end: 3,
+                stride: 16,
+                dim: 14,
+                k: 3
+            )
+
+            let rawProjected = KNN.withExactNeighborsInContiguousCluster(
+                query: query,
+                orderedVectors: orderedVectors,
+                start: 0,
+                end: 3,
+                stride: 16,
+                dim: 14,
+                k: 3
+            ) { rawNeighbors in
+                rawNeighbors.compactMap { raw -> Neighbor? in
+                    guard raw.record_index >= 0 else { return nil }
+                    return Neighbor(
+                        recordIndex: Int(raw.record_index),
+                        distanceSquared: raw.distance_squared
+                    )
+                }
+            }
+            return (projected, rawProjected)
+        }
+
+        #expect(rawProjected == projected.map { Neighbor(recordIndex: $0.recordIndex, distanceSquared: $0.distanceSquared) })
+    }
+
     @Test func adaptiveIVFExpandsAmbiguousVotesBeforeDeciding() throws {
         let cluster0: [(vector: [Int16], label: UInt8)] = [
             ([10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 1),
@@ -403,7 +447,7 @@ struct SearchTests {
             query: query,
             in: index,
             ivf: ivf,
-            config: SearchConfig(nprobe: 1),
+            config: SearchConfig(nprobe: 1, useBoundingBoxes: true),
             metrics: &metrics,
             k: 3
         )

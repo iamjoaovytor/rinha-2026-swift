@@ -96,7 +96,7 @@ extension KNN {
                 }
                 let start = Int(offsets[extraCluster.cluster])
                 let end = Int(offsets[extraCluster.cluster + 1])
-                let clusterNeighbors = exactNeighborsInContiguousCluster(
+                _ = withExactNeighborsInContiguousCluster(
                     query: query,
                     orderedVectors: orderedVectors,
                     start: start,
@@ -104,9 +104,17 @@ extension KNN {
                     stride: stride,
                     dim: dim,
                     k: k
-                )
-                for neighbor in clusterNeighbors {
-                    insertSwift(neighbor, into: &exactTop, capacity: k)
+                ) { rawNeighbors in
+                    for raw in rawNeighbors where raw.record_index >= 0 {
+                        insertSwift(
+                            Neighbor(
+                                recordIndex: start + Int(raw.record_index),
+                                distanceSquared: raw.distance_squared
+                            ),
+                            into: &exactTop,
+                            capacity: k
+                        )
+                    }
                 }
             }
         }

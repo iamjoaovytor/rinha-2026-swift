@@ -211,10 +211,7 @@ extension KNN {
 
             let start = Int(offsets[cluster])
             let end = Int(offsets[cluster + 1])
-            let candidateCount = end - start
-            if candidateCount <= 0 { continue }
-
-            let clusterNeighbors = exactNeighborsInContiguousCluster(
+            _ = withExactNeighborsInContiguousCluster(
                 query: query,
                 orderedVectors: orderedVectors,
                 start: start,
@@ -222,10 +219,17 @@ extension KNN {
                 stride: ivf.header.stride,
                 dim: index.header.dim,
                 k: k
-            )
-
-            for neighbor in clusterNeighbors {
-                insertSwift(neighbor, into: &top, capacity: k)
+            ) { rawNeighbors in
+                for raw in rawNeighbors where raw.record_index >= 0 {
+                    insertSwift(
+                        Neighbor(
+                            recordIndex: start + Int(raw.record_index),
+                            distanceSquared: raw.distance_squared
+                        ),
+                        into: &top,
+                        capacity: k
+                    )
+                }
             }
         }
 
@@ -244,7 +248,7 @@ extension KNN {
                 }
                 let start = Int(offsets[extraCluster.cluster])
                 let end = Int(offsets[extraCluster.cluster + 1])
-                let clusterNeighbors = exactNeighborsInContiguousCluster(
+                _ = withExactNeighborsInContiguousCluster(
                     query: query,
                     orderedVectors: orderedVectors,
                     start: start,
@@ -252,9 +256,17 @@ extension KNN {
                     stride: ivf.header.stride,
                     dim: index.header.dim,
                     k: k
-                )
-                for neighbor in clusterNeighbors {
-                    insertSwift(neighbor, into: &top, capacity: k)
+                ) { rawNeighbors in
+                    for raw in rawNeighbors where raw.record_index >= 0 {
+                        insertSwift(
+                            Neighbor(
+                                recordIndex: start + Int(raw.record_index),
+                                distanceSquared: raw.distance_squared
+                            ),
+                            into: &top,
+                            capacity: k
+                        )
+                    }
                 }
             }
         }

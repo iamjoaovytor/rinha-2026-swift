@@ -87,6 +87,37 @@ extension KNN {
         }
     }
 
+    static func withExactNeighborsInContiguousCluster<T>(
+        query: [Int16],
+        orderedVectors: UnsafeBufferPointer<Int16>,
+        start: Int,
+        end: Int,
+        stride: Int,
+        dim: Int,
+        k: Int,
+        _ body: (UnsafeBufferPointer<rinha_neighbor_t>) -> T
+    ) -> T? {
+        let candidateCount = end - start
+        guard candidateCount > 0 else { return nil }
+
+        return withUnsafeTemporaryAllocation(of: rinha_neighbor_t.self, capacity: min(k, candidateCount)) { rawNeighbors in
+            query.withUnsafeBufferPointer { queryBuffer in
+                let vectorsBase = orderedVectors.baseAddress!.advanced(by: start * stride)
+                rinha_topk_exact_i16_filtered(
+                    queryBuffer.baseAddress,
+                    vectorsBase,
+                    numericCast(candidateCount),
+                    numericCast(dim),
+                    numericCast(stride),
+                    numericCast(min(k, candidateCount)),
+                    rawNeighbors.baseAddress
+                )
+                let rawCount = min(k, candidateCount)
+                return body(UnsafeBufferPointer(start: rawNeighbors.baseAddress, count: rawCount))
+            }
+        }
+    }
+
     static func exactNeighborsInIndexedCluster(
         query: [Int16],
         index: ReferencesIndex,
