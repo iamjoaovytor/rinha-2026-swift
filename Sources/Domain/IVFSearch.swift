@@ -32,7 +32,7 @@ extension KNN {
             ivf: ivf,
             pq: pq,
             nprobe: config.nprobe,
-            useBoundingBoxes: config.useBoundingBoxes,
+            useBoundingBoxes: config.expandedSearchUsesBoundingBoxes(),
             ivfpqRerankCandidates: config.ivfpqRerankCandidates,
             metrics: metrics,
             k: k

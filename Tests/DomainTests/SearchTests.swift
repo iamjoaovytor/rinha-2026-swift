@@ -388,6 +388,103 @@ struct SearchTests {
         #expect(adaptiveVotes == exactFraudVotes)
     }
 
+    @Test func adaptiveIVFCanExpandUnanimousInitialVotesWhenEnabled() throws {
+        let cluster0: [(vector: [Int16], label: UInt8)] = [
+            ([100, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 1),
+            ([101, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 1),
+            ([102, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 1),
+            ([103, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 1),
+            ([104, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 1),
+        ]
+        let cluster1: [(vector: [Int16], label: UInt8)] = [
+            ([1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 0),
+            ([2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 0),
+            ([3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 0),
+            ([4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 1),
+            ([5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 1),
+        ]
+        let records = cluster0 + cluster1
+        let referencesURL = try writeReferences(records)
+        let ivfURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ref-\(UUID().uuidString).ivf")
+        defer {
+            try? FileManager.default.removeItem(at: referencesURL)
+            try? FileManager.default.removeItem(at: ivfURL)
+        }
+
+        let centroids: [Int16] = [
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ]
+        let offsets: [UInt32] = [0, 5, 10]
+        let postings: [UInt32] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+        let orderedVectors = records.flatMap(\.vector)
+        let orderedLabels = records.map(\.label)
+        try writeIVF(
+            path: ivfURL,
+            count: records.count,
+            clusterCount: 2,
+            centroids: centroids,
+            bboxMin: nil,
+            bboxMax: nil,
+            offsets: offsets,
+            postings: postings,
+            orderedVectors: orderedVectors,
+            orderedLabels: orderedLabels
+        )
+
+        let index = try ReferencesIndex.load(path: referencesURL.path)
+        let ivf = try IVFIndex.load(path: ivfURL.path)
+        let query: [Int16] = .init(repeating: 0, count: 16)
+
+        let exactFraudVotes = KNN.fraudVoteCount(query: query, in: index, k: 5)
+        let initialVotes = KNN.fraudVoteCount(
+            query: query,
+            in: index,
+            ivf: ivf,
+            config: SearchConfig(nprobe: 1),
+            k: 5
+        )
+        let withoutUnanimousExpansion = KNN.fraudVoteCount(
+            query: query,
+            in: index,
+            ivf: ivf,
+            config: SearchConfig(nprobe: 2, initialNprobe: 1),
+            k: 5
+        )
+        let withUnanimousExpansion = KNN.fraudVoteCount(
+            query: query,
+            in: index,
+            ivf: ivf,
+            config: SearchConfig(
+                nprobe: 2,
+                initialNprobe: 1,
+                expandOnUnanimousInitialVotes: true
+            ),
+            k: 5
+        )
+
+        #expect(initialVotes == 5)
+        #expect(exactFraudVotes == 2)
+        #expect(withoutUnanimousExpansion == 5)
+        #expect(withUnanimousExpansion == exactFraudVotes)
+    }
+
+    @Test func searchConfigCanForceBoundingBoxesOnlyOnExpandedSearch() {
+        let baseline = SearchConfig(nprobe: 12, initialNprobe: 2, useBoundingBoxes: false)
+        let expandedBBox = SearchConfig(
+            nprobe: 12,
+            initialNprobe: 2,
+            useBoundingBoxes: false,
+            useBoundingBoxesOnExpandedSearch: true
+        )
+
+        #expect(baseline.useBoundingBoxes == false)
+        #expect(baseline.expandedSearchUsesBoundingBoxes() == false)
+        #expect(expandedBBox.useBoundingBoxes == false)
+        #expect(expandedBBox.expandedSearchUsesBoundingBoxes())
+    }
+
     @Test func ivfUsesBoundingBoxesToRecoverCloserClusterOutsideNProbe() throws {
         let cluster0: [(vector: [Int16], label: UInt8)] = [
             ([10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 0),
