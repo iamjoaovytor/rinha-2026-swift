@@ -12,7 +12,7 @@ services:
       IVFPQ_RERANK_CANDIDATES: "${IVFPQ_RERANK_CANDIDATES:-}"
       IVF_USE_BBOX: "${IVF_USE_BBOX:-0}"
       DEBUG_STATS: "${DEBUG_STATS:-0}"
-      WARMUP_COUNT: "${WARMUP_COUNT:-50000}"
+      WARMUP_COUNT: "${WARMUP_COUNT:-10000}"
       SOCKET_HANDOFF: "1"
       SOCKET_PATH: "/sockets/api1.sock"
     volumes:

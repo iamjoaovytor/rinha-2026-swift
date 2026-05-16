@@ -6,16 +6,27 @@ enum SearchWarmup {
         let warmupCount = ProcessInfo.processInfo.environment["WARMUP_COUNT"].flatMap(Int.init) ?? 5_000
         guard warmupCount > 0 else { return }
         let started = DispatchTime.now().uptimeNanoseconds
-        let count = loaded.index.header.count
+        // Read query vectors from IVF centroids (32KB), not ReferencesIndex.vectors (111MB).
+        // Reading 111MB during warmup evicts IVFIndex pages from the 130MB container limit.
         let stride = loaded.index.header.stride
-        let basePtr = loaded.index.vectors.baseAddress!
+        let centroidCount: Int
+        let centroidPtr: UnsafePointer<Int16>?
+        if let ivf = loaded.ivf {
+            centroidCount = ivf.header.clusterCount
+            centroidPtr = ivf.centroids.baseAddress
+        } else {
+            centroidCount = 0
+            centroidPtr = nil
+        }
         var rng = SplitMix64(seed: 0xCAFE_BABE_DEAD_BEEF)
         var sink = 0
         for _ in 0..<warmupCount {
-            let recIdx = Int(rng.next() % UInt64(count))
             var query = [Int16](repeating: 0, count: 16)
-            for lane in 0..<stride {
-                query[lane] = basePtr[recIdx * stride + lane]
+            if let ptr = centroidPtr, centroidCount > 0 {
+                let recIdx = Int(rng.next() % UInt64(centroidCount))
+                for lane in 0..<stride {
+                    query[lane] = ptr[recIdx * stride + lane]
+                }
             }
             query[0] = query[0] &+ 17
             query[7] = query[7] &+ 23
