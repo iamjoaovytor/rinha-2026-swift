@@ -51,7 +51,7 @@ services:
     volumes:
       - sockets:/sockets
     cpus: "0.26"
-    mem_limit: "90MB"
+    mem_limit: "78MB"
     security_opt:
       - seccomp:unconfined
     ulimits:
@@ -62,7 +62,7 @@ services:
       resources:
         limits:
           cpus: "0.26"
-          memory: "90MB"
+          memory: "78MB"
 
   warmup:
     image: curlimages/curl:8.8.0
