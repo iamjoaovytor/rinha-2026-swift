@@ -1,6 +1,6 @@
 services:
   api1: &api
-    image: joaovytor/rinha-2026-swift:v3
+    image: joaovytor/iamjoaovytor-swift-c:latest
     platform: linux/amd64
     environment: &api_env
       IVF_NPROBE: "${IVF_NPROBE:-12}"
@@ -50,7 +50,7 @@ services:
       WORKERS: "1"
     volumes:
       - sockets:/sockets
-    cpus: "0.30"
+    cpus: "0.26"
     mem_limit: "90MB"
     security_opt:
       - seccomp:unconfined
@@ -61,8 +61,35 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.30"
+          cpus: "0.26"
           memory: "90MB"
+
+  warmup:
+    image: curlimages/curl:8.8.0
+    platform: linux/amd64
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        until curl -fsS http://lb:9999/ready 2>/dev/null; do sleep 1; done
+        PA='{"id":"wa","transaction":{"amount":85.50,"installments":1,"requested_at":"2026-05-16T10:00:00Z"},"customer":{"avg_amount":90.0,"tx_count_24h":2,"known_merchants":["merch-01"]},"merchant":{"id":"merch-01","mcc":"5411","avg_amount":95.0},"terminal":{"is_online":false,"card_present":true,"km_from_home":1.2},"last_transaction":{"timestamp":"2026-05-15T18:30:00Z","km_from_current":0.8}}'
+        PB='{"id":"wb","transaction":{"amount":450.0,"installments":3,"requested_at":"2026-05-16T03:00:00Z"},"customer":{"avg_amount":60.0,"tx_count_24h":8,"known_merchants":[]},"merchant":{"id":"merch-99","mcc":"5912","avg_amount":200.0},"terminal":{"is_online":true,"card_present":false,"km_from_home":350.0},"last_transaction":null}'
+        i=0
+        while [ $$i -lt 50 ]; do
+          curl -fsS -X POST http://lb:9999/fraud-score -H 'Content-Type: application/json' -d "$$PA" > /dev/null
+          curl -fsS -X POST http://lb:9999/fraud-score -H 'Content-Type: application/json' -d "$$PB" > /dev/null
+          i=$$(($$i+1))
+        done
+    depends_on:
+      - lb
+    cpus: "0.04"
+    mem_limit: "12MB"
+    restart: "no"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.04"
+          memory: "12MB"
 
 volumes:
   sockets:
